@@ -1,7 +1,7 @@
 # Modern R Development Guide (data.table Edition)
 
 *An opinionated guide for R development that prioritizes data.table, base R, and ggplot2.
-No tidyverse. No magrittr. No excuses. Last updated: March 2026.*
+The tidyverse trades dependencies and a proprietary dialect for ergonomics — a reasonable trade for many workflows. This guide prefers base R and tools that earn their inclusion. Last updated: March 2026.*
 
 ---
 
@@ -22,7 +22,9 @@ pkgs <- c(
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
   "S7",          # modern OOP for new package development
-  "broom"        # tidy model output (used in lapply+rbindlist examples)
+  "broom",       # tidy model output (used in lapply+rbindlist examples)
+  "testthat",    # unit testing
+  "targets"      # make-like pipeline framework
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -93,7 +95,7 @@ dt[, label   := fcase(flag & group == "A", "outlier_A",
 
 ## data.table: The Core Workhorse
 
-data.table is the correct choice for data manipulation in R. It is:
+data.table is a strong choice for data manipulation in R. It is:
 
 - Significantly faster than dplyr for most operations
 - Far more memory-efficient (modify by reference)
@@ -254,8 +256,7 @@ add_flag <- function(dt) {
 ## Base R: Use It More
 
 Base R is underused. It's fast, stable, has zero dependencies, and is already loaded.
-The tidyverse's main selling point was making base R more ergonomic — but that ergonomics
-comes at a steep dependency cost and requires learning a new dialect.
+The ergonomics argument for tidyverse comes with a dependency cost and a dialect to learn.
 
 ### Functional Programming with Base R
 
@@ -375,8 +376,8 @@ focused package — not the rest of tidyverse.
 
 ## ggplot2: It's Great, Use It
 
-ggplot2 is excellent. It is not part of what's wrong with tidyverse — it composes
-with any data source (data.table, base R data frames, matrices via `reshape2`/`melt`).
+ggplot2 is exquisite, and it composes with any tabular data source
+(data.table, base R data frames, matrices via `reshape2`/`melt`).
 
 ```r
 library(ggplot2)
@@ -418,7 +419,7 @@ p + my_theme
 
 ### Computed Variables
 
-Compute in data.table, plot in ggplot2. Do not use `dplyr::mutate()` inside a ggplot
+Compute in data.table, plot in ggplot2. Avoid `dplyr::mutate()` inside a ggplot
 pipeline. The boundary is clean and each tool does what it's good at.
 
 ```r
@@ -1135,7 +1136,7 @@ Every dependency you add is a dependency your users carry. Be deliberate.
 # - readr   (use fread)
 # - tibble  (use data.table or data.frame)
 # - fst     (unmaintained since 2022 — use feather for new work)
-# - tidyverse (never: this is a meta-package that pulls in everything)
+# - tidyverse (meta-package — pulls in everything; prefer individual tools)
 ```
 
 ### Input Validation
@@ -1180,6 +1181,376 @@ if (any(is.na(dt$score))) {
     "Set na.rm = FALSE to error instead."
   )
 }
+```
+
+---
+
+## Test-Driven Development with testthat
+
+TDD clarifies requirements before you write code. It forces you to define what
+"correct" means before you have a stake in any implementation, and gives you a safety
+net for refactoring. Use it for any non-trivial function.
+
+### The TDD Cycle
+
+1. **RED** — write a failing test that specifies the behaviour you need
+2. **GREEN** — write the minimal code to make it pass; resist the urge to do more
+3. **REFACTOR** — clean up with the safety net of a passing test
+4. **COMMIT** — ship tested, working code
+
+### Setup
+
+```r
+install.packages("testthat")
+```
+
+For a standalone script workflow (no package), put tests in a `tests/` directory
+and run them with `testthat::test_dir("tests/")`. For package development,
+`usethis::use_testthat()` wires everything up.
+
+```
+project/
+├── R/
+│   └── analysis.R
+└── tests/
+    └── test-analysis.R
+```
+
+### Writing Tests
+
+```r
+# tests/test-analysis.R
+library(testthat)
+source("R/analysis.R")
+
+# ── RED: write these before the function exists ───────────────────────────
+
+test_that("compute_effect_size returns correct Cohen's d", {
+  x <- c(2, 3, 5, 7, 8)
+  y <- c(1, 2, 3, 4, 5)
+  d <- compute_effect_size(x, y, type = "cohen_d")
+  expect_type(d, "double")
+  expect_length(d, 1)
+  expect_gt(d, 0)                  # x has higher mean, so d should be positive
+})
+
+test_that("compute_effect_size errors on non-numeric input", {
+  expect_error(compute_effect_size("a", 1:5), class = "simpleError")
+})
+
+test_that("compute_effect_size handles equal vectors", {
+  x <- c(1, 2, 3)
+  expect_equal(compute_effect_size(x, x, type = "cohen_d"), 0)
+})
+```
+
+### Core Expectations
+
+```r
+# Equality
+expect_equal(result, expected)           # numeric: uses tolerance (~1e-7)
+expect_identical(result, expected)       # exact: type + value + attributes
+
+# Type and structure
+expect_type(x, "double")
+expect_s3_class(dt, "data.table")
+expect_length(x, 3)
+expect_named(dt, c("id", "score"))       # check column names
+
+# Conditions
+expect_error(f(bad_input))               # any error
+expect_error(f(x), "must be numeric")   # error message matches regex
+expect_warning(f(x), "NA values")       # warning message matches regex
+expect_no_error(f(good_input))          # assert no error is thrown
+expect_message(f(x), "Processing")      # message() output matches
+
+# Logical
+expect_true(all(dt$score > 0))
+expect_false(anyNA(dt$id))
+expect_gt(n, 0); expect_gte(n, 1)
+expect_lt(err, 0.01); expect_lte(err, 0.05)
+
+# Snapshots — useful for complex output (plots, print methods)
+expect_snapshot(print(my_object))        # writes/compares a .snap file
+```
+
+### Testing data.table Functions
+
+```r
+# ── Test that := does not affect the caller's object ──────────────────────
+test_that("add_z_score does not modify input by reference", {
+  dt <- data.table(score = c(1, 2, 3, 4, 5))
+  original <- copy(dt)
+  result <- add_z_score(copy(dt))       # pass a copy if function modifies in place
+  expect_equal(dt, original)            # caller's dt unchanged
+  expect_true("score_z" %in% names(result))
+})
+
+# ── Test groupwise correctness ─────────────────────────────────────────────
+test_that("summarise_by_group returns correct means per group", {
+  dt <- data.table(
+    group = c("A", "A", "B", "B"),
+    value = c(1, 3, 2, 4)
+  )
+  result <- summarise_by_group(dt)
+  expect_equal(result[group == "A", mean_val], 2)
+  expect_equal(result[group == "B", mean_val], 3)
+})
+```
+
+### Running Tests
+
+```r
+# Run all tests in a directory
+testthat::test_dir("tests/")
+
+# Run a single file
+testthat::test_file("tests/test-analysis.R")
+
+# In a package
+devtools::test()
+
+# Run a specific test by name (grepl match on description)
+testthat::test_dir("tests/", filter = "effect_size")
+```
+
+### What to Test
+
+Test the contract of a function — its inputs, outputs, and error conditions —
+not its implementation. If the body changes but the contract holds, your tests
+should still pass.
+
+```r
+# Good: tests the contract
+test_that("fit_group_models returns one row per group per term", {
+  dt <- data.table(
+    group   = rep(c("A", "B"), each = 20),
+    outcome = rnorm(40),
+    age     = sample(18:65, 40, replace = TRUE)
+  )
+  result <- fit_group_models(dt, outcome ~ age, group_col = "group")
+  expect_s3_class(result, "data.table")
+  expect_true(all(c("term", "estimate") %in% names(result)))
+  expect_equal(nrow(result), 2 * 2)   # 2 groups * 2 terms (intercept + age)
+})
+
+# Avoid: tests an implementation detail (the internal formula string)
+```
+
+---
+
+## targets: Make-like Pipelines
+
+`targets` is the correct tool for any multi-step analysis where:
+
+- steps are slow and you don't want to rerun them unnecessarily
+- you want a clear record of what depends on what
+- you need reproducibility across sessions and machines
+
+It replaces ad-hoc `if (file.exists(...)) { skip } else { run }` patterns with
+a principled dependency graph. Re-run the pipeline: only outdated targets execute.
+
+### Setup
+
+```r
+install.packages("targets")
+```
+
+A targets pipeline lives in `_targets.R` at the project root. That file defines
+the pipeline; everything else is just R functions.
+
+```
+project/
+├── _targets.R          # pipeline definition
+├── R/
+│   └── functions.R     # the actual work lives here
+└── data/
+    └── raw.csv
+```
+
+### A Minimal Pipeline
+
+```r
+# _targets.R
+library(targets)
+
+# Load your functions — keep them in R/ and source them here
+tar_source("R/functions.R")
+
+# Set options (packages available to all targets, common format, etc.)
+tar_option_set(packages = c("data.table", "ggplot2"))
+
+# Define the pipeline as a list of tar_target() calls
+list(
+  tar_target(raw_data,    load_raw("data/raw.csv")),   # reads file
+  tar_target(clean_data,  clean(raw_data)),             # depends on raw_data
+  tar_target(model,       fit_model(clean_data)),        # depends on clean_data
+  tar_target(figure,      plot_results(model, clean_data))
+)
+```
+
+```r
+# R/functions.R
+load_raw <- function(path) {
+  as.data.table(fread(path))
+}
+
+clean <- function(dt) {
+  dt <- copy(dt)
+  dt <- dt[!is.na(outcome)]
+  dt[, score_z := (score - mean(score)) / sd(score)]
+  dt
+}
+
+fit_model <- function(dt) {
+  lm(outcome ~ score_z + age + group, data = dt)
+}
+
+plot_results <- function(model, dt) {
+  # returns a ggplot object
+  ...
+}
+```
+
+```r
+# Run the pipeline — only outdated targets execute
+tar_make()
+
+# Inspect results
+tar_read(clean_data)    # load a target's value into session
+tar_load(model)         # load into environment by name
+
+# Check pipeline status
+tar_visnetwork()        # dependency graph in the Viewer
+tar_outdated()          # which targets need to rerun
+tar_manifest()          # table of all targets and their commands
+```
+
+### File Targets: Track Input and Output Files
+
+When a target reads or writes a file, declare it with `format = "file"` so
+targets tracks the file's hash, not just whether the code changed.
+
+```r
+list(
+  # Input file: rerun if the CSV changes on disk
+  tar_target(
+    raw_path,
+    "data/raw.csv",
+    format = "file"
+  ),
+
+  # raw_path is now the file path string — pass it to your reader
+  tar_target(raw_data, load_raw(raw_path)),
+
+  # Output file: target returns the path; targets hashes the file
+  tar_target(
+    report_path,
+    {
+      path <- "output/report.html"
+      rmarkdown::render("report.Rmd", output_file = path)
+      path
+    },
+    format = "file"
+  )
+)
+```
+
+### Branching: Map Over Many Inputs
+
+Static branching generates targets at pipeline-definition time — you know the
+inputs upfront. Dynamic branching generates targets at runtime, useful when the
+number of items isn't known until a prior target runs.
+
+```r
+# ── Static branching: known inputs ────────────────────────────────────────
+list(
+  tar_target(
+    model_A,
+    fit_subgroup(clean_data, group = "A")
+  ),
+  tar_target(
+    model_B,
+    fit_subgroup(clean_data, group = "B")
+  )
+)
+
+# ── Dynamic branching: inputs determined at runtime ────────────────────────
+list(
+  tar_target(clean_data, clean(raw_data)),
+
+  # Split into a list of data.tables — one per group
+  tar_target(
+    group_data,
+    split(clean_data, by = "group"),
+    pattern = NULL  # this target itself isn't branched
+  ),
+
+  # Fit a model for each element — creates one sub-target per group
+  tar_target(
+    group_model,
+    fit_model(group_data),
+    pattern = map(group_data)   # branches over group_data
+  ),
+
+  # Aggregate all branches back into one object
+  tar_target(
+    all_coefs,
+    rbindlist(lapply(tar_read(group_model), broom::tidy), idcol = "group")
+  )
+)
+```
+
+### TDD and targets Together
+
+Write and test your functions in isolation with testthat. The pipeline wires
+them together — it is not a substitute for function-level tests.
+
+```r
+# R/functions.R — pure functions, easy to test
+clean <- function(dt) {
+  dt <- copy(dt)
+  dt <- dt[!is.na(outcome)]
+  dt[, score_z := (score - mean(score)) / sd(score)]
+  dt
+}
+
+# tests/test-functions.R — test the function, not the pipeline
+test_that("clean removes NA rows and adds score_z", {
+  dt <- data.table(outcome = c(1, NA, 3), score = c(10, 20, 30))
+  result <- clean(dt)
+  expect_equal(nrow(result), 2)
+  expect_true("score_z" %in% names(result))
+  expect_equal(result$score_z, scale(c(10, 30))[, 1])
+})
+```
+
+The key discipline: **keep the work in functions, keep the pipeline thin**. A
+`tar_target()` command should be a single function call. If it's more than that,
+extract the logic into a named function and test it.
+
+### Common Operations
+
+```r
+# Add targets and testthat to your package list
+tar_option_set(packages = c("data.table", "ggplot2", "stringr"))
+
+# Invalidate a specific target (force rerun)
+tar_invalidate(model)
+
+# Delete all cached targets and start fresh
+tar_destroy()
+
+# Run in parallel — requires the `crew` package (by the targets author)
+# crew provides a unified controller API over multiple backends:
+#   crew_controller_local()  — local processes
+#   crew.cluster package adds crew_controller_slurm(), _sge(), etc. for HPC
+library(crew)
+tar_option_set(controller = crew_controller_local(workers = 4))
+tar_make()
+
+# Store targets in a non-default location (useful for large outputs)
+tar_option_set(store = "cache/_targets")
 ```
 
 ---
@@ -1253,7 +1624,5 @@ if (identical(x, "abc")) { ... } # not: if (x == "abc") for scalars
 
 ---
 
-*This guide is intentionally opinionated. The tidyverse has real value in teaching
-and in collaborative workflows where homogeneous style matters more than performance.
-If that's your context, use it. If you're writing production pipelines, packages,
-or working with non-trivial data, the tools above will serve you better.*
+*This guide is intentionally opinionated. The tools here are fast, stable, and
+earn their place — that's the standard everything in this guide is held to.*
