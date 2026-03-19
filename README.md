@@ -6,8 +6,8 @@ This guide is directly adapted from **Sarah Johnson's** Modern R Development Gui
 Sarah is a housing analyst at Princeton University's Eviction Lab and an R programmer.
 Her guide established the structure, format, and scope that this one builds on.
 The philosophical differences---favouring data.table, base R, and minimal dependencies
-over tidyverse---are mine, not hers. I separated the human-readable guide from the much 
-more terse and directive CLAUDE.md. All other work is hers. All errors are mine.
+over tidyverse---are mine. I also separated the human-readable guide from the much 
+more terse and directive CLAUDE.md. All errors are mine.
 
 - GitHub: [sj-io](https://github.com/sj-io)
 - Web: [sarahjohnson.io](https://sarahjohnson.io)
