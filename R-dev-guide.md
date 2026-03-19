@@ -501,6 +501,9 @@ Parallelism section).
 The key insight: **write a function that returns a `data.table` for one unit of
 work, then map it**. The function is testable in isolation; the mapping is trivial.
 
+<details>
+<summary>Full lapply + rbindlist patterns</summary>
+
 ```r
 # ── Core pattern ──────────────────────────────────────────────────────────
 
@@ -584,6 +587,8 @@ results <- lapply(cohorts, function(cohort) {
 flat_dt <- rbindlist(unlist(results, recursive = FALSE))
 ```
 
+</details>
+
 ### Naming
 
 ```r
@@ -621,7 +626,12 @@ dt <- fread("big.csv", select = c("id", "date", "outcome"))
 # Read only rows matching a condition using shell preprocessing
 dt <- fread(cmd = "grep 'treatment' big.csv")
 dt <- fread(cmd = "awk -F, '$3 == \"A\"' big.csv")  # column filter
+```
 
+<details>
+<summary>Chunked file reading</summary>
+
+```r
 # For very large files, read in chunks
 # WARNING: readLines-based chunking breaks on CSV fields that contain embedded newlines
 # (valid per RFC 4180). Safe only if you control the data and know it has none.
@@ -641,6 +651,8 @@ repeat {
 close(con)
 result <- rbindlist(results)
 ```
+
+</details>
 
 ### Modify In Place (data.table)
 
@@ -733,6 +745,9 @@ startup cost. Workers start fresh and need explicit export of objects and packag
 Required when: you're on Windows, you need workers to be fully isolated (e.g., they
 load conflicting libraries), or you're distributing across machines.
 
+<details>
+<summary>mclapply, parLapply, and when not to parallelize</summary>
+
 ```r
 library(parallel)
 
@@ -799,6 +814,8 @@ stopCluster(cl)  # always clean up
 system.time(my_function(items[[1]]))
 # If < 0.1s and you have 1000 items, parallelize. If < 0.01s, probably don't bother.
 ```
+
+</details>
 
 ### Binary Formats: Feather and Parquet
 
@@ -877,6 +894,9 @@ files directly, with the Arrow zero-copy integration meaning no data moves betwe
 R and DuckDB memory during queries. It also handles out-of-core sorting, joining,
 and windowing for data that exceeds RAM.
 
+<details>
+<summary>Partitioned parquet + DuckDB queries</summary>
+
 ```r
 library(arrow)
 library(duckdb)
@@ -930,6 +950,8 @@ result_parquet <- as.data.table(dbGetQuery(con, "
 
 dbDisconnect(con, shutdown = TRUE)
 ```
+
+</details>
 
 ### Memory Monitoring
 
@@ -1218,6 +1240,9 @@ project/
 
 ### Writing Tests
 
+<details>
+<summary>Example test file</summary>
+
 ```r
 # tests/test-analysis.R
 library(testthat)
@@ -1243,6 +1268,8 @@ test_that("compute_effect_size handles equal vectors", {
   expect_equal(compute_effect_size(x, x, type = "cohen_d"), 0)
 })
 ```
+
+</details>
 
 ### Core Expectations
 
@@ -1276,6 +1303,9 @@ expect_snapshot(print(my_object))        # writes/compares a .snap file
 
 ### Testing data.table Functions
 
+<details>
+<summary>Reference semantics and groupwise correctness tests</summary>
+
 ```r
 # ── Test that := does not affect the caller's object ──────────────────────
 test_that("add_z_score does not modify input by reference", {
@@ -1297,6 +1327,8 @@ test_that("summarise_by_group returns correct means per group", {
   expect_equal(result[group == "B", mean_val], 3)
 })
 ```
+
+</details>
 
 ### Running Tests
 
@@ -1370,6 +1402,9 @@ project/
 
 ### A Minimal Pipeline
 
+<details>
+<summary>_targets.R, R/functions.R, and common commands</summary>
+
 ```r
 # _targets.R
 library(targets)
@@ -1426,6 +1461,8 @@ tar_outdated()          # which targets need to rerun
 tar_manifest()          # table of all targets and their commands
 ```
 
+</details>
+
 ### File Targets: Track Input and Output Files
 
 When a target reads or writes a file, declare it with `format = "file"` so
@@ -1461,6 +1498,9 @@ list(
 Static branching generates targets at pipeline-definition time — you know the
 inputs upfront. Dynamic branching generates targets at runtime, useful when the
 number of items isn't known until a prior target runs.
+
+<details>
+<summary>Static and dynamic branching examples</summary>
 
 ```r
 # ── Static branching: known inputs ────────────────────────────────────────
@@ -1500,6 +1540,8 @@ list(
   )
 )
 ```
+
+</details>
 
 ### TDD and targets Together
 
