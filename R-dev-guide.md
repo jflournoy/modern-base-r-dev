@@ -1,7 +1,10 @@
 # Modern R Development Guide (data.table Edition)
 
 *An opinionated guide for R development that prioritizes data.table, base R, and ggplot2.
-The tidyverse trades dependencies and a proprietary dialect for ergonomics — a reasonable trade for many workflows. This guide prefers base R and tools that earn their inclusion. Last updated: March 2026.*
+The tidyverse trades dependencies and a proprietary dialect for ergonomics — a reasonable 
+trade for many workflows. This guide prefers base R and tools that earn their inclusion. 
+Each guideline contains a minimal reproducible example (MRE). As long as you have the package
+installed you should be able to run the MRE. Last updated: March 2026.*
 
 ---
 
@@ -22,9 +25,7 @@ pkgs <- c(
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
   "S7",          # modern OOP for new package development
-  "broom",       # tidy model output (used in lapply+rbindlist examples)
-  "testthat",    # unit testing
-  "targets"      # make-like pipeline framework
+  "broom"        # tidy model output (used in lapply+rbindlist examples)
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -59,21 +60,34 @@ whole expression), they collapse meaningful transformations into anonymous steps
 make profiling harder. The name you give an intermediate variable is free documentation.
 
 ```r
-# Prefer plain function calls
+library(data.table)
+
+set.seed(1)
+dt <- data.table(
+  id    = 1:200,
+  group = rep(c("A", "B"), 100),
+  year  = rep(2021:2022, each = 100),
+  score = c(rnorm(100, mean = 5), rnorm(100, mean = 6))
+)
+ref <- data.table(group = c("A", "B"), label = c("control", "treatment"))
+
+# Prefer plain function calls over pipes
+x      <- exp(pi)
 result <- round(log(x), 3)
 
 # Two-step pipe is acceptable, but the above is preferred
 result <- log(x) |> round(3)
 
-# More than two — use intermediate variables
+# More than two — use intermediate variables, not a chain
 # Don't do this:
-result <- dt |> some_filter() |> some_agg() |> some_reshape() |> some_join(ref)
+# result <- dt |> some_filter() |> some_agg() |> some_reshape() |> some_join(ref)
 
 # Do this:
-filtered   <- dt[condition & !is.na(score)]
+filtered   <- dt[!is.na(score)]
 aggregated <- filtered[, .(mean_score = mean(score), n = .N), by = .(group, year)]
 reshaped   <- dcast(aggregated, group ~ year, value.var = "mean_score")
 result     <- merge(reshaped, ref, by = "group", all.x = TRUE)
+result
 ```
 
 Intermediate variables have costs only when they're large — in that case, use `:=`
@@ -82,13 +96,22 @@ large intermediates is data.table's reference semantics, not collapsing everythi
 into a chain.
 
 ```r
+library(data.table)
+
+set.seed(1)
+dt <- data.table(
+  id    = 1:200,
+  group = rep(c("A", "B"), 100),
+  score = c(rnorm(100, mean = 5), rnorm(100, mean = 6))
+)
+
 # When intermediate objects would be large, modify in place
 dt[, score_z := (score - mean(score)) / sd(score)]
 dt[, flag    := score_z > 2]
 dt[, label   := fcase(flag & group == "A", "outlier_A",
                       flag & group == "B", "outlier_B",
                       default = "normal")]
-# dt is modified in place at each step — no copies, no chain needed
+dt
 ```
 
 ---
@@ -128,6 +151,17 @@ setDT(df)
 Learn this and you rarely need anything else.
 
 ```r
+library(data.table)
+
+set.seed(1)
+dt <- data.table(
+  id    = 1:100,
+  age   = sample(15:45, 100, replace = TRUE),
+  group = sample(c("A", "B"), 100, replace = TRUE),
+  year  = sample(2020:2022, 100, replace = TRUE),
+  score = rnorm(100, mean = 50, sd = 10)
+)
+
 # i: row filtering
 dt[age > 30]
 dt[group == "A" & !is.na(score)]
@@ -147,66 +181,121 @@ dt[age > 18, .(mean_score = mean(score), n = .N), by = group]
 ### Column Operations
 
 ```r
-# Add/modify columns in place (no copy made)
-dt[, new_col := value]
-dt[, c("a", "b") := .(val_a, val_b)]
+library(data.table)
+
+dt <- data.table(
+  id    = 1:6,
+  x     = c(1.2, 2.4, 3.1, 4.5, 5.0, 6.7),
+  y     = c(10, 20, 30, 40, 50, 60),
+  z     = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+  score = c(0.3, 0.7, 0.5, 0.9, 0.1, 0.8),
+  group = c("A", "A", "B", "B", "A", "B")
+)
+
+# Add/modify columns in place
+dt[, new_col := x * 2]
+dt[, c("a", "b") := .(x + y, y - z)]
 
 # Conditional assignment
-dt[condition, flag := TRUE]
+dt[group == "A", flag := TRUE]
 dt[, label := ifelse(score > 0.5, "high", "low")]
 
-# Delete column
-dt[, col_to_drop := NULL]
+# Delete a column
+dt[, new_col := NULL]
 
-# Multiple columns from a character vector
+# Apply a function to multiple columns by name
 cols <- c("x", "y", "z")
 dt[, (cols) := lapply(.SD, scale), .SDcols = cols]
+dt
 ```
 
 ### Grouping and Aggregation
 
 ```r
+library(data.table)
+
+set.seed(42)
+dt <- data.table(
+  group      = rep(c("A", "B", "C"), each = 30),
+  year       = rep(rep(2021:2023, each = 10), 3),
+  value      = rnorm(90, mean = 100, sd = 15),
+  score_math = rnorm(90, 70, 10),
+  score_read = rnorm(90, 75, 8)
+)
+
 # Basic aggregation
 summary_dt <- dt[, .(
-  mean_val  = mean(value, na.rm = TRUE),
-  sd_val    = sd(value, na.rm = TRUE),
-  n         = .N
+  mean_val = mean(value, na.rm = TRUE),
+  sd_val   = sd(value, na.rm = TRUE),
+  n        = .N
 ), by = .(group, year)]
+summary_dt
 
-# Running operations by group (no ungroup() needed — data.table doesn't group permanently)
+# Add group mean back to original table (no ungroup() needed)
 dt[, group_mean := mean(value), by = group]
 
 # Grouped operations on multiple columns
-dt[, lapply(.SD, mean, na.rm = TRUE), by = group, .SDcols = c("x", "y", "z")]
+dt[, lapply(.SD, mean, na.rm = TRUE), by = group, .SDcols = c("score_math", "score_read")]
 
-# .SD is the subset of data for each group — use .SDcols to limit it
+# .SD with column name patterns
 dt[, lapply(.SD, function(x) x - mean(x)), .SDcols = patterns("^score")]
 ```
 
 ### Joins
 
 ```r
-# Merge (left join by default when all.x = TRUE)
-result <- merge(dt_a, dt_b, by = "id")
-result <- merge(dt_a, dt_b, by = "id", all.x = TRUE)   # left join
-result <- merge(dt_a, dt_b, by = c("id", "year"))       # compound key
-result <- merge(dt_a, dt_b, by.x = "id_a", by.y = "id_b")  # different names
+library(data.table)
 
-# data.table keyed join (fast, especially for large tables)
+dt_a <- data.table(
+  id    = c("s01", "s02", "s03", "s04"),
+  year  = c(2021, 2021, 2022, 2022),
+  score = c(82, 74, 91, 68)
+)
+dt_b <- data.table(
+  id    = c("s01", "s02", "s03", "s05"),
+  group = c("ctrl", "treat", "ctrl", "treat")
+)
+
+# merge: inner, left, explicit names
+merge(dt_a, dt_b, by = "id")                        # inner
+merge(dt_a, dt_b, by = "id", all.x = TRUE)          # left join
+merge(dt_a, dt_b, by.x = "id", by.y = "id")         # explicit names
+
+# Keyed join (fast for large tables)
 setkey(dt_a, id)
 setkey(dt_b, id)
-result <- dt_b[dt_a]   # right join of dt_a into dt_b
+dt_b[dt_a]  # right join: all dt_a rows, matching dt_b
 
-# Rolling joins (very powerful for time series)
-setkey(transactions, id, date)
+# Rolling join: last known price on or before each transaction
+prices <- data.table(
+  id    = c("X", "X", "X", "Y", "Y"),
+  date  = as.IDate(c("2024-01-01", "2024-03-01", "2024-06-01",
+                     "2024-01-01", "2024-04-01")),
+  price = c(100, 105, 110, 200, 210)
+)
+transactions <- data.table(
+  id   = c("X", "X", "Y"),
+  date = as.IDate(c("2024-02-15", "2024-07-01", "2024-05-01"))
+)
 setkey(prices, id, date)
-result <- prices[transactions, roll = TRUE]  # last price on or before transaction date
+setkey(transactions, id, date)
+prices[transactions, roll = TRUE]
 ```
 
 ### Reshaping
 
 ```r
+library(data.table)
+
 # Wide to long
+wide_dt <- data.table(
+  id      = 1:4,
+  year    = c(2021, 2021, 2022, 2022),
+  score_1 = c(80, 75, 90, 85),
+  score_2 = c(70, 65, 88, 82),
+  score_3 = c(60, 72, 78, 91)
+)
+
 long_dt <- melt(
   wide_dt,
   id.vars       = c("id", "year"),
@@ -214,20 +303,14 @@ long_dt <- melt(
   variable.name = "wave",
   value.name    = "score"
 )
+long_dt
 
-# Long to wide
-wide_dt <- dcast(
-  long_dt,
-  id + year ~ wave,
-  value.var = "score"
-)
+# Long back to wide
+dcast(long_dt, id + year ~ wave, value.var = "score")
 
-# Multiple value columns at once
-wide_dt <- dcast(
-  long_dt,
-  id ~ wave,
-  value.var = c("score", "weight")
-)
+# Multiple value columns at once (add a weight column first)
+long_dt[, weight := runif(.N, 0.5, 1.5)]
+dcast(long_dt, id ~ wave, value.var = c("score", "weight"))
 ```
 
 ### Reference Semantics: Understand What You're Doing
@@ -236,19 +319,29 @@ data.table modifies by reference. This is a feature, not a bug — but it means 
 to think about copies.
 
 ```r
-# This modifies dt IN PLACE — dt_copy points to the same object
-dt_copy <- dt
-dt[, new_col := 1]  # Also modifies dt_copy!
+library(data.table)
 
-# To get an actual copy
-dt_copy <- copy(dt)
-dt[, new_col := 1]  # dt_copy is unaffected
+dt <- data.table(x = 1:3, y = c("a", "b", "c"))
 
-# Functions that modify their input should document this expectation
-add_flag <- function(dt) {
-  dt[, flag := TRUE]  # modifies in place — caller's object changes
-  invisible(dt)
+# dt_shallow and dt point to the same object — modifying one changes both
+dt_shallow <- dt
+dt[, z := 99]
+dt_shallow  # z column appears here too!
+
+# copy() creates an independent object
+dt2      <- data.table(x = 1:3, y = c("a", "b", "c"))
+dt2_copy <- copy(dt2)
+dt2[, z := 99]
+dt2_copy  # z column does NOT appear
+
+# Function that modifies in place — caller's object changes
+add_flag <- function(d) {
+  d[, flag := TRUE]
+  invisible(d)
 }
+dt3 <- data.table(x = 1:3)
+add_flag(dt3)
+print(dt3)  # flag column is present
 ```
 
 ---
@@ -261,36 +354,45 @@ The ergonomics argument for tidyverse comes with a dependency cost and a dialect
 ### Functional Programming with Base R
 
 ```r
+dt_list <- list(
+  A = data.frame(score = c(80, 90, 70)),
+  B = data.frame(score = c(60, 85, 75)),
+  C = data.frame(score = c(95, 55, 88))
+)
+
 # lapply returns a list — reliable and explicit
-results <- lapply(files, read.csv)
+means_list <- lapply(dt_list, function(d) mean(d$score))
+means_list
 
-# sapply is convenient but type-unstable — use it only when you know the output type
-means <- sapply(dt_list, function(d) mean(d$score))  # fine, will be numeric
-
-# Use vapply when you need type safety
-means <- vapply(dt_list, function(d) mean(d$score), numeric(1))  # guarantees numeric(1)
+# vapply: type-safe, returns named numeric vector
+means_vec <- vapply(dt_list, function(d) mean(d$score), numeric(1))
+means_vec
 
 # Map over multiple inputs
-results <- Map(function(x, y) x + y, list_a, list_b)
+list_a <- list(1:3, 4:6, 7:9)
+list_b <- list(10, 20, 30)
+Map(function(x, y) x + y, list_a, list_b)
 
 # Reduce for accumulation
-total <- Reduce("+", list_of_vectors)
-cumulative <- Reduce("+", list_of_vectors, accumulate = TRUE)
+Reduce("+", list(1:4, 5:8, 9:12))
+Reduce("+", list(1:4, 5:8, 9:12), accumulate = TRUE)
 ```
 
 ### Apply Over Data Frames / data.tables
 
 ```r
-# Column-wise operations on a data.table
-col_means <- dt[, lapply(.SD, mean, na.rm = TRUE), .SDcols = is.numeric]
+library(data.table)
 
-# On a plain matrix
-col_means <- colMeans(mat, na.rm = TRUE)
-row_sums   <- rowSums(mat, na.rm = TRUE)
+mat <- matrix(c(1, 2, NA, 4, 5, 6, 7, NA, 9), nrow = 3)
 
-# apply on a matrix (careful: apply coerces to common type)
-row_results <- apply(mat, 1, my_func)  # 1 = rows
-col_results <- apply(mat, 2, my_func)  # 2 = columns
+colMeans(mat, na.rm = TRUE)
+rowSums(mat, na.rm = TRUE)
+apply(mat, 1, function(x) sum(x^2, na.rm = TRUE))  # row-wise
+apply(mat, 2, max, na.rm = TRUE)                    # col-wise
+
+# On a data.table
+dt <- data.table(a = c(1, 2, 3), b = c(4, NA, 6), c = c(7, 8, 9))
+dt[, lapply(.SD, mean, na.rm = TRUE), .SDcols = is.numeric]
 ```
 
 ### String Manipulation: stringr and stringi
@@ -306,67 +408,69 @@ operations, or anything where you need performance on large character vectors.
 ```r
 library(stringr)
 
+x    <- c("apple-42", "banana-7", "cherry-100", "NA-value", "café")
+name <- "world"
+
 # Detection
-str_detect(x, "pattern")          # logical vector — grepl() equivalent
-str_starts(x, "prefix")
-str_ends(x, "suffix")
-str_count(x, "pattern")           # count occurrences per element
+str_detect(x, "\\d+")
+str_starts(x, "ban")
+str_ends(x, "\\d")
+str_count(x, "[aeiou]")
 
 # Extraction
 str_extract(x, "\\d+")            # first match
-str_extract_all(x, "\\d+")        # all matches (returns list)
+str_extract_all(x, "[a-z]+")      # all matches (returns list)
 str_match(x, "(\\w+)-(\\d+)")     # capture groups → matrix
 
 # Substitution
-str_replace(x, "old", "new")      # first match
-str_replace_all(x, "old", "new")  # all matches
+str_replace(x, "-", "_")          # first match
+str_replace_all(x, "[aeiou]", "*") # all matches
 
 # Splitting and combining
-str_split(x, ",")                 # returns list
-str_split_fixed(x, ",", n = 3)    # returns matrix, fixed n columns
-str_c(a, b, sep = "-")            # paste() equivalent, NA-safe
-str_glue("Hello {name}!")         # glue-style interpolation
+str_split(x, "-")
+str_split_fixed(x, "-", n = 2)
+str_c("item", 1:3, sep = "_")
+str_glue("Hello {name}!")
 
 # Basic operations
 str_length(x)
-str_to_lower(x); str_to_upper(x); str_to_title(x)
-str_trim(x)                        # strip whitespace
-str_pad(x, width = 10, side = "left")
+str_to_lower(x)
+str_trim("  spaces  ")
+str_pad("42", width = 6, side = "left")
 str_sub(x, 1, 5)
-str_trunc(x, width = 80)
+str_trunc(x, width = 8)
 
 # Pattern helpers
-str_detect(x, fixed("$"))         # literal, no regex interpretation
-str_detect(x, regex("\\d+", ignore_case = TRUE))
-str_detect(x, coll("é", locale = "fr"))  # locale-aware collation
+str_detect(c("$100", "100"), fixed("$"))
+str_detect(c("Abc123", "abc"), regex("ABC", ignore_case = TRUE))
+str_detect(c("café", "cafe"), coll("é", locale = "fr"))
 ```
 
 ```r
 library(stringi)
 
-# When you need more than stringr offers:
-stri_trans_general(x, "Latin-ASCII")    # transliterate, e.g. "é" → "e"
-stri_conv(x, from = "UTF-8", to = "UTF-8")  # re-encode between charsets (rarely needed in R)
-stri_sort(x, locale = "pl_PL")          # locale-aware sort
-stri_pad_left(x, width = 10)            # faster than str_pad on large vectors
-stri_count_regex(x, pattern)            # ICU regex, handles Unicode categories
-stri_extract_all_words(x)               # sensible word tokenization
+x <- c("café", "naïve", "résumé", "hello")
+
+stri_trans_general(x, "Latin-ASCII")       # strip accents: "cafe", "naive", ...
+stri_sort(x, locale = "fr_FR")             # French locale sort
+stri_pad_left(c("a", "bb", "ccc"), width = 5)
+stri_count_regex(x, "[aeiou]")
+stri_extract_all_words("the quick brown fox")
 ```
 
 ### Date/Time
 
 ```r
-# Base R handles dates well for most purposes
 Sys.Date()
 as.Date("2024-01-15")
 format(Sys.Date(), "%Y-%m")
 
-# Arithmetic
-end_date - start_date             # difftime object
-as.numeric(end_date - start_date) # days as number
+start_date <- as.Date("2024-01-01")
+end_date   <- as.Date("2024-06-30")
+end_date - start_date
+as.numeric(end_date - start_date)
 
-# Sequences
-seq(as.Date("2020-01-01"), as.Date("2024-12-31"), by = "month")
+seq(as.Date("2024-01-01"), as.Date("2024-06-01"), by = "month")
 ```
 
 `lubridate` is fine and reasonable for heavy date manipulation. It's a thin,
@@ -380,7 +484,19 @@ ggplot2 is exquisite, and it composes with any tabular data source
 (data.table, base R data frames, matrices via `reshape2`/`melt`).
 
 ```r
+library(data.table)
 library(ggplot2)
+
+set.seed(7)
+dt <- data.table(
+  id        = 1:120,
+  group     = rep(c("ctrl", "treat"), 60),
+  condition = rep(c("low", "high", "low", "high"), 30),
+  wave      = rep(1:3, each = 40),
+  score     = rnorm(120, mean = 50, sd = 12),
+  passed    = rbinom(120, 1, 0.65)
+)
+dt[, cohort := paste0("C", sample(1:3, 120, replace = TRUE))]
 
 # ggplot2 works directly with data.tables
 ggplot(dt, aes(x = group, y = score, fill = condition)) +
@@ -389,8 +505,8 @@ ggplot(dt, aes(x = group, y = score, fill = condition)) +
 
 # Compute summaries in data.table, then plot — don't pipe into ggplot
 summary_dt <- dt[, .(
-  mean  = mean(score, na.rm = TRUE),
-  se    = sd(score, na.rm = TRUE) / sqrt(.N)
+  mean = mean(score, na.rm = TRUE),
+  se   = sd(score, na.rm = TRUE) / sqrt(.N)
 ), by = .(group, wave)]
 
 ggplot(summary_dt, aes(x = wave, y = mean, color = group)) +
@@ -402,19 +518,15 @@ ggplot(summary_dt, aes(x = wave, y = mean, color = group)) +
 ### Theme Preferences
 
 ```r
-# Set a default theme rather than repeating it
-theme_set(theme_bw(base_size = 12))
+library(ggplot2)
 
 # Custom reusable theme layer
 my_theme <- theme_bw(base_size = 12) +
   theme(
-    panel.grid.minor  = element_blank(),
-    strip.background  = element_rect(fill = "grey92"),
-    legend.position   = "bottom"
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = "grey92"),
+    legend.position  = "bottom"
   )
-
-# Apply it
-p + my_theme
 ```
 
 ### Computed Variables
@@ -423,18 +535,29 @@ Compute in data.table, plot in ggplot2. Avoid `dplyr::mutate()` inside a ggplot
 pipeline. The boundary is clean and each tool does what it's good at.
 
 ```r
+library(data.table)
+library(ggplot2)
+
+set.seed(7)
+dt <- data.table(
+  passed = rbinom(120, 1, 0.65),
+  cohort = paste0("C", sample(1:3, 120, replace = TRUE))
+)
+
+my_theme <- theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+
 # Good: prepare, then plot
 plot_dt <- dt[, .(
-  n          = .N,
-  pct_pass   = mean(passed),
-  ci_lo      = mean(passed) - 1.96 * sqrt(mean(passed) * (1 - mean(passed)) / .N),  # normal approx
-  ci_hi      = mean(passed) + 1.96 * sqrt(mean(passed) * (1 - mean(passed)) / .N)   # adequate for large n
+  n        = .N,
+  pct_pass = mean(passed),
+  ci_lo    = mean(passed) - 1.96 * sqrt(mean(passed) * (1 - mean(passed)) / .N),
+  ci_hi    = mean(passed) + 1.96 * sqrt(mean(passed) * (1 - mean(passed)) / .N)
 ), by = cohort]
 
 ggplot(plot_dt, aes(x = cohort, y = pct_pass, ymin = ci_lo, ymax = ci_hi)) +
-  geom_pointrange()
-
-# Bad: tangled dplyr + ggplot pipeline — hard to debug, hard to reuse data
+  geom_pointrange() +
+  my_theme
 ```
 
 ---
@@ -444,13 +567,12 @@ ggplot(plot_dt, aes(x = cohort, y = pct_pass, ymin = ci_lo, ymax = ci_hi)) +
 ### Structure and Style
 
 ```r
-# Good: explicit, testable, debuggable
+library(data.table)
+
 compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
-  type  <- match.arg(type)
-  # weighted pooled SD — correct for unequal n; simplifies to sqrt((var(x)+var(y))/2) when n_x==n_y
+  type      <- match.arg(type)
   pooled_sd <- sqrt(((length(x) - 1) * var(x) + (length(y) - 1) * var(y)) /
                     (length(x) + length(y) - 2))
-
   if (type == "cohen_d") {
     (mean(x) - mean(y)) / pooled_sd
   } else {
@@ -458,7 +580,10 @@ compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
   }
 }
 
-# Intermediate variables are your friend — not a sign of bad code
+set.seed(1)
+compute_effect_size(rnorm(50, 5), rnorm(50, 4))
+compute_effect_size(rnorm(50, 5), rnorm(50, 4), type = "glass_delta")
+
 fit_group_models <- function(dt, formula, group_col) {
   dt_list <- split(dt, by = group_col)
   fits    <- lapply(dt_list, function(d) lm(formula, data = d))
@@ -466,9 +591,16 @@ fit_group_models <- function(dt, formula, group_col) {
     co <- coef(f)
     data.table(term = names(co), estimate = unname(co))
   })
-  result  <- rbindlist(coefs, idcol = group_col)
-  result
+  rbindlist(coefs, idcol = group_col)
 }
+
+set.seed(2)
+dt <- data.table(
+  group     = rep(c("A", "B"), each = 50),
+  outcome   = rnorm(100, 10, 2),
+  predictor = rnorm(100, 5, 1)
+)
+fit_group_models(dt, outcome ~ predictor, "group")
 ```
 
 ### Avoid Growing Objects
@@ -476,17 +608,23 @@ fit_group_models <- function(dt, formula, group_col) {
 Pre-allocate results instead of growing them iteratively:
 
 ```r
-# Bad: copies at every iteration — O(n²) memory
-result <- c()
-for (i in seq_len(n)) result <- c(result, compute(i))
+library(data.table)
 
-# Good: pre-allocate a vector when results are atomic
-result <- vector("numeric", n)
-for (i in seq_len(n)) result[i] <- compute(i)
+n       <- 200
+compute <- function(i) i^2 + rnorm(1)
 
-# Best for tabular results: lapply + rbindlist
-results <- lapply(seq_len(n), compute)
+# Bad: O(n²) copies
+result_bad <- c()
+for (i in seq_len(n)) result_bad <- c(result_bad, compute(i))
+
+# Good: pre-allocate
+result_good <- vector("numeric", n)
+for (i in seq_len(n)) result_good[i] <- compute(i)
+
+# Best for tabular results
+results <- lapply(seq_len(n), function(i) data.table(i = i, val = compute(i)))
 result  <- rbindlist(results)
+result
 ```
 
 ### lapply + rbindlist: The Core Pattern
@@ -505,107 +643,74 @@ work, then map it**. The function is testable in isolation; the mapping is trivi
 <summary>Full lapply + rbindlist patterns</summary>
 
 ```r
+library(data.table)
+library(stringr)
+
 # ── Core pattern ──────────────────────────────────────────────────────────
 
-# Each call returns a data.table for one item
-process_file <- function(path) {
-  dt <- fread(path)
-  dt[, .(
-    file    = basename(path),
-    n       = .N,
-    mean_x  = mean(x, na.rm = TRUE),
-    missing = sum(is.na(x))
-  )]
+# Function returns one data.table per item; combine with rbindlist
+summarise_group <- function(grp, dt) {
+  d <- dt[group == grp]
+  d[, .(group = grp, n = .N, mean_score = mean(score), sd_score = sd(score))]
 }
 
-file_paths <- list.files("data/", pattern = "\\.csv$", full.names = TRUE)
-results    <- lapply(file_paths, process_file)
-summary_dt <- rbindlist(results)
+set.seed(3)
+dt     <- data.table(group = rep(c("A", "B", "C"), each = 40),
+                     score = rnorm(120, 70, 10))
+groups <- unique(dt$group)
+rbindlist(lapply(groups, summarise_group, dt = dt))
 
 # ── idcol: track which item produced each row ──────────────────────────────
 
-# When your function returns multiple rows, idcol labels them
 fit_group <- function(group_dt) {
-  fit    <- lm(outcome ~ age + treatment, data = group_dt)
-  result <- as.data.table(broom::tidy(fit))
-  result
+  as.data.table(coef(lm(score ~ 1, data = group_dt)), keep.rownames = "term")
 }
-
-dt_list    <- split(dt, by = "cohort")
-fits       <- lapply(dt_list, fit_group)
-coef_dt    <- rbindlist(fits, idcol = "cohort")
-# coef_dt has a "cohort" column identifying which split each row came from
+dt_list <- split(dt, by = "group")
+rbindlist(lapply(dt_list, fit_group), idcol = "group")
 
 # ── use.names: stack columns by name, not position ────────────────────────
 
-# Safe when data.tables from different sources may have columns in different order
-rbindlist(results, use.names = TRUE, fill = TRUE)
-# fill = TRUE: missing columns in some data.tables get NA rather than erroring
+r1 <- data.table(a = 1, b = 2)
+r2 <- data.table(a = 3,      c = 5)
+rbindlist(list(r1, r2), use.names = TRUE, fill = TRUE)
 
-# ── Index-based: when you need the index inside the function ───────────────
+# ── Index-based: seed per simulation ──────────────────────────────────────
 
 run_simulation <- function(sim_id) {
   set.seed(sim_id)
-  dt <- simulate_data()
-  dt[, sim_id := sim_id]
-  dt[, .(sim_id, estimate = mean(outcome), se = sd(outcome) / sqrt(.N))]
+  x <- rnorm(30)
+  data.table(sim_id = sim_id, estimate = mean(x), se = sd(x) / sqrt(length(x)))
 }
-
-sim_results <- rbindlist(lapply(seq_len(1000), run_simulation))
+sim_results <- rbindlist(lapply(seq_len(50), run_simulation))
+sim_results
 
 # ── Composing with parallelism: swap lapply for mclapply ──────────────────
 # The function is identical — only the mapping changes.
 # Caveat: mclapply uses fork() and is unstable in RStudio/Positron on macOS.
 # See the Parallelism section for details and the parLapply alternative.
 
-sim_results <- rbindlist(mclapply(seq_len(1000), run_simulation, mc.cores = n_cores))
-
-# ── Reading many files ─────────────────────────────────────────────────────
-
-# Pattern: read + light transform per file, combine once
-load_wave <- function(path) {
-  dt        <- fread(path)
-  dt[, wave := as.integer(str_extract(basename(path), "\\d+"))]
-  dt
-}
-
-all_waves <- rbindlist(lapply(wave_files, load_wave), use.names = TRUE)
+# sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores))
 
 # ── Nested: lapply inside lapply, flatten with rbindlist ──────────────────
 
-# Outer loop: cohorts; inner loop: outcomes
-results <- lapply(cohorts, function(cohort) {
-  cohort_dt <- dt[group == cohort]
-  lapply(outcome_vars, function(var) {
-    cohort_dt[, .(
-      cohort   = cohort,
-      outcome  = var,
-      estimate = mean(.SD[[var]], na.rm = TRUE)
-    )]
+cohorts      <- c("C1", "C2")
+outcome_vars <- c("score_a", "score_b")
+set.seed(4)
+dt2 <- data.table(
+  cohort  = rep(cohorts, each = 20),
+  score_a = rnorm(40),
+  score_b = rnorm(40, mean = 1)
+)
+nested <- lapply(cohorts, function(coh) {
+  sub <- dt2[cohort == coh]
+  lapply(outcome_vars, function(v) {
+    sub[, .(cohort = coh, outcome = v, estimate = mean(.SD[[v]], na.rm = TRUE))]
   })
 })
-flat_dt <- rbindlist(unlist(results, recursive = FALSE))
+rbindlist(unlist(nested, recursive = FALSE))
 ```
 
 </details>
-
-### Naming
-
-```r
-# Variables: nouns, snake_case
-pupil_scores     <- ...
-model_coefs      <- ...
-group_summary_dt <- ...
-
-# Functions: verbs, snake_case
-compute_icc       <- function(...) { ... }
-fit_mixed_model   <- function(...) { ... }
-load_wave_data    <- function(...) { ... }
-
-# Constants: all caps (optional but useful)
-MAX_ITER <- 1000
-DEFAULT_ALPHA <- 0.05
-```
 
 ---
 
@@ -749,70 +854,37 @@ load conflicting libraries), or you're distributing across machines.
 <summary>mclapply, parLapply, and when not to parallelize</summary>
 
 ```r
+library(data.table)
 library(parallel)
 
-# detectCores() returns logical (hyperthreaded) cores — overcounts for CPU-bound work.
-# Use logical = FALSE to get physical cores, which is what you want for R tasks.
-# detectCores() can return NA on some systems; guard against that.
 n_cores <- max(1L, parallel::detectCores(logical = FALSE) - 1L)
-# Alternatively: parallelly::availableCores() is more robust in cluster/container envs
+
+run_simulation <- function(sim_id) {
+  set.seed(sim_id)
+  x <- rnorm(100)
+  data.table(sim_id = sim_id, estimate = mean(x), se = sd(x) / sqrt(length(x)))
+}
 
 # ── Multicore (fork): mclapply ─────────────────────────────────────────────
 # Use when: Unix/Mac, CPU-bound, workers share a large read-only object
-# Workers inherit the parent environment at fork — no export needed
-# data.table objects are especially efficient here (copy-on-write at OS level)
-#
-# WARNING: fork-based parallelism is unstable inside RStudio and Positron on macOS.
-# Symptoms: hangs, silent NULLs in results, or crashes with data.table + OpenMP.
-# If this happens: run from the terminal instead of the IDE console, or switch to
-# parLapply (socket cluster). If crashes persist with data.table loaded, call
-# data.table::setDTthreads(1) before forking.
-
-results <- mclapply(
-  seq_len(n_sims),
-  function(i) run_simulation(shared_params, i),
-  mc.cores    = n_cores,
-  mc.set.seed = TRUE   # reproducible RNG across workers
-)
-
-# Pattern: parallel model fitting over groups
-dt_list <- split(dt, by = "group")            # list of data.tables
-fits    <- mclapply(dt_list, function(d) {
-  lm(outcome ~ predictor_1 + predictor_2, data = d)
-}, mc.cores = n_cores)
-coef_dt <- rbindlist(lapply(fits, broom::tidy), idcol = "group")
+# WARNING: unstable inside RStudio/Positron on macOS — run from terminal if hangs occur
+sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores,
+                                  mc.set.seed = TRUE))
+sim_results
 
 # ── Multiprocess (socket): parLapply ──────────────────────────────────────
 # Use when: Windows, isolated workers needed, or distributing across nodes
-# Must explicitly export objects and load packages on each worker
-
 cl <- makeCluster(n_cores)
-
-# Export everything workers need
-clusterExport(cl, varlist = c("my_function", "lookup_table", "threshold"))
-
-# Load packages on workers
-clusterEvalQ(cl, {
-  library(data.table)
-  library(stringr)
-})
-
-# Optionally seed each worker for reproducibility
+clusterExport(cl, varlist = "run_simulation")
+invisible(clusterEvalQ(cl, library(data.table)))
 clusterSetRNGStream(cl, iseed = 42)
 
-results <- parLapply(cl, items, my_function)
-stopCluster(cl)  # always clean up
+sim_results2 <- rbindlist(parLapply(cl, seq_len(50), run_simulation))
+stopCluster(cl)
+sim_results2
 
-# ── When NOT to parallelize ────────────────────────────────────────────────
-# Parallelism has real overhead. It hurts more than it helps when:
-#   - The task takes < ~100ms per item (overhead dominates)
-#   - Workers need to communicate or share mutable state
-#   - Memory is constrained (forking copies pages on write; socket workers duplicate)
-#   - The bottleneck is I/O (disk/network), not CPU — parallel I/O can make it worse
-
-# Quick check: time one item first
-system.time(my_function(items[[1]]))
-# If < 0.1s and you have 1000 items, parallelize. If < 0.01s, probably don't bother.
+# Quick check before parallelising — is one item worth the overhead?
+system.time(run_simulation(1))
 ```
 
 </details>
@@ -839,36 +911,30 @@ BigQuery, and DuckDB. The tradeoff is slower writes (typically 2–3× vs feathe
 data you write once and query many times.
 
 ```r
+library(data.table)
 library(arrow)
 
-# ── Feather: default for iterative R work ────────────────────────────────
-# Write once after reading from CSV
-dt_raw <- fread("data.csv")
-write_feather(dt_raw, "data.arrow")              # LZ4 compression by default
-write_feather(dt_raw, "data.arrow",
-              compression = "zstd")              # smaller files, slightly slower reads
+set.seed(7)
+dt_raw <- data.table(
+  id      = 1:1000,
+  outcome = rnorm(1000),
+  group   = sample(c("A", "B", "C"), 1000, replace = TRUE),
+  date    = seq.Date(as.Date("2022-01-01"), by = "day", length.out = 1000)
+)
 
-# Read back — fast, and works with data.table directly
-dt <- as.data.table(read_feather("data.arrow"))
+# ── Feather: fast reads, good for iterative work ──────────────────────────
+feather_path <- tempfile(fileext = ".arrow")
+write_feather(dt_raw, feather_path)
+dt <- as.data.table(read_feather(feather_path))
 
 # Column selection on read
-dt_sub <- as.data.table(read_feather(
-  "data.arrow",
-  col_select = c("id", "date", "outcome")
-))
+dt_sub <- as.data.table(read_feather(feather_path, col_select = c("id", "outcome")))
 
-# ── Parquet: storage, sharing, large data ─────────────────────────────────
-write_parquet(dt, "data.parquet")                # Snappy compression by default
-write_parquet(dt, "data.parquet",
-              compression = "zstd")              # better ratio, still fast to read
-
-dt <- as.data.table(read_parquet("data.parquet"))
-
-# Column selection on read (parquet is columnar — unread columns cost nothing)
-dt_sub <- as.data.table(read_parquet(
-  "data.parquet",
-  col_select = c("id", "outcome", "weight")
-))
+# ── Parquet: best compression, good for storage and sharing ──────────────
+parquet_path <- tempfile(fileext = ".parquet")
+write_parquet(dt_raw, parquet_path)
+dt2     <- as.data.table(read_parquet(parquet_path))
+dt2_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "group")))
 
 # ── Format reference ───────────────────────────────────────────────────────
 # feather:  fastest reads, cross-language, LZ4/ZSTD, good for iterative work
@@ -898,55 +964,59 @@ and windowing for data that exceeds RAM.
 <summary>Partitioned parquet + DuckDB queries</summary>
 
 ```r
+library(data.table)
 library(arrow)
 library(duckdb)
 
-# ── Partition on write ────────────────────────────────────────────────────
-
-# Pay the cost once, benefit on every subsequent query
-write_dataset(
-  dt,
-  path         = "data/partitioned/",
-  format       = "parquet",
-  partitioning = c("year", "group")
+set.seed(8)
+dt <- data.table(
+  id      = 1:400,
+  year    = rep(2020:2023, each = 100),
+  group   = sample(c("control", "treatment"), 400, replace = TRUE),
+  cohort  = sample(c("C1", "C2"), 400, replace = TRUE),
+  outcome = rnorm(400, 10, 2),
+  weight  = runif(400)
 )
-# Creates: data/partitioned/year=2021/group=treatment/part-0.parquet, etc.
+
+# ── Partition on write ────────────────────────────────────────────────────
+part_dir <- file.path(tempdir(), "partitioned")
+write_dataset(dt, path = part_dir, format = "parquet",
+              partitioning = c("year", "group"))
 
 # ── DuckDB ────────────────────────────────────────────────────────────────
-
-# SQL is the query language at this layer. The Arrow dplyr verbs (filter,
-# select, collect) require loading dplyr, which conflicts with data.table.
-# DuckDB handles all of this cleanly without extra dependencies.
-
+# SQL is the query language here — no dplyr verbs needed or loaded
 con <- dbConnect(duckdb())
-
-# Register a data.table as a virtual table — zero copy
 duckdb_register(con, "dt", dt)
 
 # WHERE = filter rows, SELECT = columns, GROUP BY = aggregate
 result_dt <- as.data.table(dbGetQuery(con, "
-  SELECT   cohort, AVG(outcome) AS mean_outcome, COUNT(*) AS n
+  SELECT   cohort,
+           AVG(outcome)  AS mean_outcome,
+           COUNT(*)      AS n
   FROM     dt
   WHERE    year = 2021
     AND    \"group\" = 'treatment'
   GROUP BY cohort
 "))
+result_dt
 
-# Window functions — no equivalent outside SQL here
+# Window functions
 result_ranked <- as.data.table(dbGetQuery(con, "
   SELECT   id, cohort, outcome,
            ROW_NUMBER() OVER (PARTITION BY cohort ORDER BY outcome DESC) AS rnk
   FROM     dt
   WHERE    year >= 2021
 "))
+result_ranked
 
 # Query partitioned parquet files directly — nothing loaded into R first
-result_parquet <- as.data.table(dbGetQuery(con, "
+result_parquet <- as.data.table(dbGetQuery(con, sprintf("
   SELECT   cohort, AVG(outcome) AS mean_outcome, COUNT(*) AS n
-  FROM     read_parquet('data/partitioned/**/*.parquet')
+  FROM     read_parquet('%s/**/*.parquet')
   WHERE    year = 2021
   GROUP BY cohort
-"))
+", part_dir)))
+result_parquet
 
 dbDisconnect(con, shutdown = TRUE)
 ```
@@ -956,21 +1026,19 @@ dbDisconnect(con, shutdown = TRUE)
 ### Memory Monitoring
 
 ```r
-# Check object sizes
-# Note: object.size() undercounts for data.tables — it misses key/index overhead
-# and shared ALTREP columns. Use data.table's tables() for accurate in-session accounting.
-object.size(dt)
+library(data.table)
+
+dt    <- data.table(x = rnorm(1e5), y = rnorm(1e5))
+small <- data.table(a = 1:10)
+
 format(object.size(dt), units = "MB")
 
-# All data.tables in session with accurate sizes, keys, and row/col counts
-tables()
+tables()  # accurate sizes for all data.tables in session
 
-# Check all objects in environment, sorted by size (base R objects)
-sizes <- vapply(ls(), function(x) object.size(get(x)), numeric(1))
-head(sort(sizes, decreasing = TRUE), 10)
+sizes <- vapply(ls(), function(nm) object.size(get(nm)), numeric(1))
+head(sort(sizes, decreasing = TRUE), 5)
 
-# Free memory explicitly when done with large intermediates
-rm(big_intermediate)
+rm(small)
 gc()
 ```
 
@@ -991,24 +1059,33 @@ R is a vectorized language — lean into it. Loop over elements only when you
 genuinely need element-wise control flow.
 
 ```r
-# Bad: looping over elements when vectorized ops exist
-result <- numeric(nrow(dt))
-for (i in seq_len(nrow(dt))) {
-  result[i] <- dt$x[i] * 2 + dt$y[i]
-}
+library(data.table)
+
+set.seed(9)
+dt <- data.table(
+  x         = rnorm(1000),
+  y         = rnorm(1000, 5),
+  score     = runif(1000),
+  threshold = 0.5
+)
+
+# Bad: element-wise loop
+result_loop <- numeric(nrow(dt))
+for (i in seq_len(nrow(dt))) result_loop[i] <- dt$x[i] * 2 + dt$y[i]
 
 # Good: vectorized
 dt[, result := x * 2 + y]
 
-# Complex case: use ifelse or fcase (data.table's fast case_when)
+# fcase: fast multi-condition assignment (data.table's case_when)
 dt[, category := fcase(
   score > 0.8, "high",
   score > 0.5, "medium",
   default = "low"
 )]
 
-# fifelse: data.table's fast type-stable ifelse
+# fifelse: fast type-stable ifelse
 dt[, flag := fifelse(score > threshold, TRUE, FALSE)]
+dt
 ```
 
 ---
@@ -1021,19 +1098,12 @@ S3 is the right choice for most purposes. It's simple, fast, and requires
 no dependencies.
 
 ```r
-# Constructor
-new_model_result <- function(coefs, vcov, df, call) {
-  obj <- list(
-    coefs = coefs,
-    vcov  = vcov,
-    df    = df,
-    call  = call
-  )
+new_model_result <- function(coefs, vcov_mat, df, call) {
+  obj <- list(coefs = coefs, vcov = vcov_mat, df = df, call = call)
   class(obj) <- "model_result"
   obj
 }
 
-# Methods
 print.model_result <- function(x, ...) {
   cat("Model Result\n")
   cat("Call:", deparse(x$call), "\n\n")
@@ -1041,16 +1111,26 @@ print.model_result <- function(x, ...) {
   invisible(x)
 }
 
-summary.model_result <- function(object, ...) {
-  # ...
-}
-
 coef.model_result <- function(object, ...) object$coefs
+
+# Demonstrate
+set.seed(10)
+fit <- lm(dist ~ speed, data = cars)
+res <- new_model_result(
+  coefs    = coef(fit),
+  vcov_mat = vcov(fit),
+  df       = df.residual(fit),
+  call     = fit$call
+)
+print(res)
+coef(res)
 ```
 
 ### S4: For Bioconductor or Complex Dispatch
 
 ```r
+library(data.table)
+
 setClass("Participant", representation(
   id    = "character",
   waves = "data.table",
@@ -1059,6 +1139,12 @@ setClass("Participant", representation(
 
 setGeneric("n_waves", function(x) standardGeneric("n_waves"))
 setMethod("n_waves", "Participant", function(x) nrow(x@waves))
+
+p <- new("Participant",
+         id    = "s001",
+         waves = data.table(wave = 1:3, score = c(80, 85, 90)),
+         meta  = list(site = "Lab A"))
+n_waves(p)
 ```
 
 ### S7: Good Choice for New Packages
@@ -1080,7 +1166,11 @@ Interval <- new_class("Interval",
 )
 
 x <- Interval(lo = 0, hi = 1)
-x@lo  # 0
+x@lo
+x@hi
+
+# Validator fires on invalid input
+tryCatch(Interval(lo = 5, hi = 1), error = function(e) conditionMessage(e))
 ```
 
 ---
@@ -1090,26 +1180,38 @@ x@lo  # 0
 ### 1. Profile First
 
 ```r
-library(profvis)
-profvis({
-  your_slow_function(real_data)
-})
+library(data.table)
 
-# system.time() for quick checks
-system.time({
-  your_function(data)
-})
+set.seed(11)
+dt <- data.table(
+  x     = rnorm(1e5),
+  group = sample(letters[1:5], 1e5, replace = TRUE)
+)
+
+# system.time for a quick check
+system.time(dt[, .(mean_x = mean(x)), by = group])
+
+# library(profvis)
+# profvis(dt[, .(mean_x = mean(x)), by = group])
 ```
 
 ### 2. Benchmark Alternatives
 
 ```r
+library(data.table)
 library(bench)
 
+set.seed(11)
+dt <- data.table(
+  x     = rnorm(1e5),
+  group = sample(letters[1:5], 1e5, replace = TRUE)
+)
+
 bench::mark(
-  data_table   = dt[, .(mean_val = mean(x)), by = group],
-  base_tapply  = tapply(dt$x, dt$group, mean),
-  min_iterations = 20
+  data_table  = dt[, .(mean_x = mean(x)), by = group],
+  base_tapply = tapply(dt$x, dt$group, mean),
+  min_iterations = 20,
+  check = FALSE
 )
 ```
 
@@ -1164,9 +1266,11 @@ Every dependency you add is a dependency your users carry. Be deliberate.
 ### Input Validation
 
 ```r
-# User-facing: validate fully
+library(data.table)
+
 fit_model <- function(dt, outcome, predictors, max_iter = 100) {
-  if (!is.data.table(dt)) stop("`dt` must be a data.table")
+  if (!is.data.table(dt))
+    stop("`dt` must be a data.table")
   if (!is.character(outcome) || length(outcome) != 1)
     stop("`outcome` must be a single string")
   missing_cols <- setdiff(c(outcome, predictors), names(dt))
@@ -1174,34 +1278,23 @@ fit_model <- function(dt, outcome, predictors, max_iter = 100) {
     stop("Columns not found in `dt`: ", paste(missing_cols, collapse = ", "))
   if (!is.numeric(max_iter) || max_iter < 1)
     stop("`max_iter` must be a positive integer")
-
-  # ... body
+  lm(as.formula(paste(outcome, "~", paste(predictors, collapse = "+"))), data = dt)
 }
 
-# Internal: minimal or none
-.compute_gradient <- function(y, yhat) {
-  # assumes y and yhat are numeric vectors of the same length
-  2 * (yhat - y)
-}
-```
+dt <- data.table(y = rnorm(50), x1 = rnorm(50), x2 = rnorm(50))
+fit_model(dt, "y", c("x1", "x2"))
 
-### Error Messages
+# Validation fires correctly
+tryCatch(fit_model(dt, "y", c("x1", "missing_col")), error = conditionMessage)
+tryCatch(fit_model(as.data.frame(dt), "y", "x1"),    error = conditionMessage)
 
-```r
-# Be specific. Tell people what was wrong AND what to do.
-if (nrow(dt) == 0) {
-  stop(
-    "`dt` has 0 rows after filtering. ",
-    "Check your filter conditions or the input data."
-  )
-}
+# warning() for recoverable issues
+dt_with_na <- copy(dt)
+dt_with_na[c(3, 7, 12), y := NA]
 
-# Use warning() for recoverable issues
-if (any(is.na(dt$score))) {
-  warning(
-    sum(is.na(dt$score)), " NA values in `score` will be removed. ",
-    "Set na.rm = FALSE to error instead."
-  )
+if (any(is.na(dt_with_na$y))) {
+  warning(sum(is.na(dt_with_na$y)),
+          " NA values in `y` will be removed.")
 }
 ```
 
