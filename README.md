@@ -14,6 +14,37 @@ more terse and directive CLAUDE.md. All errors are mine.
 
 ---
 
+## Files in this repo
+
 - [`R-dev-guide.md`](R-dev-guide.md) — the full human-readable guide
 - [`R-dev-examples.R`](R-dev-examples.R) — runnable examples
-- [`CLAUDE.md`](CLAUDE.md) — directive instructions for Claude Code
+- [`CLAUDE_r-devel.md`](CLAUDE_r-devel.md) — directive instructions for Claude Code (modular, can be copied to other projects)
+
+## Using the directives in your own project
+
+### Standalone (rename to CLAUDE.md)
+
+If you want Claude Code to automatically pick up these directives, copy and rename:
+
+```bash
+cp CLAUDE_r-devel.md ../your-project/CLAUDE.md
+```
+
+### Modular (keep as separate file)
+
+If you want to reference it without renaming, keep it as `CLAUDE_r-devel.md` and create a `CLAUDE.md` that sources it:
+
+```markdown
+# Project Directives
+
+For R development standards, see [CLAUDE_r-devel.md](CLAUDE_r-devel.md).
+```
+
+Or use a pre-commit hook to sync them automatically:
+
+```bash
+#!/bin/bash
+# .git/hooks/pre-commit
+cp CLAUDE_r-devel.md CLAUDE.md
+git add CLAUDE.md
+```
