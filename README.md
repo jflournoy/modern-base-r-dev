@@ -30,21 +30,21 @@ If you want Claude Code to automatically pick up these directives, copy and rena
 cp CLAUDE_r-devel.md ../your-project/CLAUDE.md
 ```
 
-### Modular (keep as separate file)
+### Modular (router pattern)
 
-If you want to reference it without renaming, keep it as `CLAUDE_r-devel.md` and create a `CLAUDE.md` that sources it:
+Keep directives as separate files and create a `CLAUDE.md` that routes to them based on context. This lets you grow multiple guides without duplication:
 
 ```markdown
 # Project Directives
 
-For R development standards, see [CLAUDE_r-devel.md](CLAUDE_r-devel.md).
+## When to Consult Each Guide
+
+### 🔴 Load for R Development Work
+
+- [CLAUDE_r-devel.md](CLAUDE_r-devel.md) — When working with R code
+  - Data.table-first philosophy
+  - Approved packages and style standards
+  - Testing, pipelines, and data I/O patterns
 ```
 
-Or use a pre-commit hook to sync them automatically:
-
-```bash
-#!/bin/bash
-# .git/hooks/pre-commit
-cp CLAUDE_r-devel.md CLAUDE.md
-git add CLAUDE.md
-```
+Claude Code will load `CLAUDE.md` and see the reference, and humans can click through to the specific guide they need.
