@@ -24,7 +24,9 @@ GUIDE    <- "R-dev-guide.md"
 EXAMPLES <- "R-dev-examples.R"
 
 MARKER_RE <- "^<!-- example: (skip|file=(\\S+)) -->$"
-FENCE_RE  <- "^```(\\w*)$"
+# Three or more backticks open a fence; it closes at a line of at least as many. A file
+# that itself contains fences (a Quarto document) is written with a four-backtick fence.
+FENCE_RE  <- "^(`{3,})(\\w*)$"
 
 parse_guide <- function(lines) {
   blocks  <- list()
@@ -48,11 +50,12 @@ parse_guide <- function(lines) {
     }
     fence <- regmatches(line, regexec(FENCE_RE, line))[[1]]
     if (length(fence)) {
-      lang  <- fence[[2]]
-      start <- i
+      lang    <- fence[[3]]
+      closing <- sprintf("^`{%d,}\\s*$", nchar(fence[[2]]))
+      start   <- i
       i <- i + 1L
       code <- character()
-      while (i <= length(lines) && !grepl("^```", lines[[i]])) {
+      while (i <= length(lines) && !grepl(closing, lines[[i]])) {
         code <- c(code, lines[[i]])
         i <- i + 1L
       }

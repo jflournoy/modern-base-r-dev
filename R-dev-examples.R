@@ -49,6 +49,48 @@ summarise_by_group <- function(dt) {
   dt[, .(mean_val = mean(value)), by = group]
 })---", "R/analysis.R")
 
+# ── file: R/tidy.R ──────────────────────────────────────────────────────────────
+dir.create("R", recursive = TRUE, showWarnings = FALSE)
+writeLines(r"---(# R/tidy.R
+library(data.table)
+
+# One row per term, for any fit whose summary() carries a coefficient matrix: lm, glm, lmer
+tidy_coef <- function(fit) {
+  co <- coef(summary(fit))
+  data.table(term = rownames(co), estimate = co[, 1], se = co[, 2])
+}
+
+# One row per smooth term, from mgcv's summary()
+tidy_smooth <- function(fit) {
+  st <- summary(fit)$s.table
+  data.table(term = rownames(st), edf = st[, "edf"], p = st[, "p-value"])
+})---", "R/tidy.R")
+
+# ── file: tests/test-tidy.R ─────────────────────────────────────────────────────
+dir.create("tests", recursive = TRUE, showWarnings = FALSE)
+writeLines(r"---(# tests/test-tidy.R
+library(testthat)
+library(data.table)
+source(here::here("R", "tidy.R"))
+
+test_that("tidy_coef returns one row per term with estimate and se", {
+  fit <- lm(dist ~ speed, data = cars)
+  out <- tidy_coef(fit)
+  expect_s3_class(out, "data.table")
+  expect_named(out, c("term", "estimate", "se"))
+  expect_equal(out$term, c("(Intercept)", "speed"))
+  expect_equal(out$estimate, unname(coef(fit)))
+})
+
+test_that("tidy_smooth reports the smooth's edf", {
+  set.seed(1)
+  d   <- data.frame(x = seq(0, 10, length.out = 100))
+  d$y <- sin(d$x) + rnorm(100, sd = 0.2)
+  out <- tidy_smooth(mgcv::gam(y ~ s(x), data = d))
+  expect_equal(out$term, "s(x)")
+  expect_gt(out$edf, 1)
+}))---", "tests/test-tidy.R")
+
 # ── file: tests/test-analysis.R ─────────────────────────────────────────────────
 dir.create("tests", recursive = TRUE, showWarnings = FALSE)
 writeLines(r"---(# tests/test-analysis.R
@@ -231,6 +273,36 @@ list(
   tar_target(all_coefs, rbindlist(group_coefs))
 ))---", "_targets_branching.R")
 
+# ── file: _targets_grid.R ───────────────────────────────────────────────────────
+writeLines(r"---(# _targets_grid.R: a specification grid, one branch per row
+library(targets)
+library(data.table)
+tar_source("R/functions.R")
+tar_option_set(
+  packages   = "data.table",
+  controller = crew::crew_controller_local(workers = 2),
+  storage    = "worker",
+  retrieval  = "worker"
+)
+
+# One specification in, one row out. The spec's own columns come along, so the result
+# says which model it belongs to without a join
+fit_spec <- function(dt, spec) {
+  rhs <- if (spec$covariate == "none") "score_z" else paste("score_z", spec$covariate, sep = " + ")
+  d   <- if (spec$subset == "all") dt else dt[group == spec$subset]
+  fit <- lm(as.formula(paste("outcome ~", rhs)), data = d)
+  data.table(spec, estimate = coef(fit)[["score_z"]], n = nrow(d))
+}
+
+list(
+  tar_target(raw_path,   "data/raw.csv", format = "file"),
+  tar_target(raw_data,   load_raw(raw_path)),
+  tar_target(clean_data, clean(raw_data)),
+  tar_target(spec,       CJ(covariate = c("none", "age"), subset = c("all", "A", "B"))),
+  tar_target(spec_fit,   fit_spec(clean_data, spec), pattern = map(spec)),
+  tar_target(curve,      spec_fit[order(estimate)])
+))---", "_targets_grid.R")
+
 # ── file: tests/test-functions.R ────────────────────────────────────────────────
 dir.create("tests", recursive = TRUE, showWarnings = FALSE)
 writeLines(r"---(# tests/test-functions.R — test the function, not the pipeline
@@ -245,6 +317,71 @@ test_that("clean removes NA rows and adds score_z", {
   expect_true("score_z" %in% names(result))
   expect_equal(result$score_z, scale(c(10, 30))[, 1])
 }))---", "tests/test-functions.R")
+
+# ── file: R/captions.R ──────────────────────────────────────────────────────────
+dir.create("R", recursive = TRUE, showWarnings = FALSE)
+writeLines(r"---(# R/captions.R
+# A caption states the finding, then the mechanics, in one sentence
+caption_fit <- function(model, dt) {
+  b <- coef(summary(model))["score_z", ]
+  sprintf("Outcome rises %.2f per SD of score (SE %.2f, N = %d).",
+          b[["Estimate"]], b[["Std. Error"]], nrow(dt))
+})---", "R/captions.R")
+
+# ── file: tests/test-captions.R ─────────────────────────────────────────────────
+dir.create("tests", recursive = TRUE, showWarnings = FALSE)
+writeLines(r"---(# tests/test-captions.R
+library(testthat)
+library(data.table)
+source(here::here("R", "captions.R"))
+
+test_that("caption_fit leads with the finding and ends with N", {
+  dt  <- data.table(outcome = c(1, 2, 4, 5), score_z = c(-1.2, -0.4, 0.4, 1.2))
+  cap <- caption_fit(lm(outcome ~ score_z, data = dt), dt)
+  expect_match(cap, "^Outcome rises [0-9.]+ per SD of score")
+  expect_match(cap, "N = 4\\)\\.$")
+}))---", "tests/test-captions.R")
+
+# ── file: report.qmd ────────────────────────────────────────────────────────────
+writeLines(r"---(---
+title: "Score and outcome"
+format:
+  html:
+    lightbox: true
+    embed-resources: true
+---
+
+```{r}
+#| include: false
+library(targets)
+library(data.table)
+source(here::here("R", "captions.R"))
+tar_load(c(model, figure, clean_data))
+```
+
+The fit is read from the pipeline; nothing here refits it.
+
+```{r}
+#| echo: false
+#| fig-cap: !expr caption_fit(model, clean_data)
+figure
+```)---", "report.qmd")
+
+# ── file: _targets_report.R ─────────────────────────────────────────────────────
+writeLines(r"---(# _targets_report.R: the minimal pipeline plus the report
+library(targets)
+library(tarchetypes)
+tar_source("R/functions.R")
+tar_option_set(packages = c("data.table", "ggplot2"))
+
+list(
+  tar_target(raw_path,    "data/raw.csv", format = "file"),
+  tar_target(raw_data,    load_raw(raw_path)),
+  tar_target(clean_data,  clean(raw_data)),
+  tar_target(model,       fit_model(clean_data)),
+  tar_target(figure,      plot_results(model, clean_data)),
+  tar_quarto(report, "report.qmd")   # depends on whatever the document tar_load()s
+))---", "_targets_report.R")
 
 # ── On Pipes: Prefer Intermediate Variables ─────────────────────────────────────
 library(data.table)
@@ -421,6 +558,34 @@ prices[transactions, roll = TRUE]
 
 stopifnot(nrow(merge(dt_a, dt_b, by = "id", all.x = TRUE)) == 4L,
           nrow(prices[transactions, roll = TRUE]) == 3L)
+
+# ── Joins That Lose Rows ────────────────────────────────────────────────────────
+library(data.table)
+
+dt_a <- data.table(id = c("s01", "s02", "s03", "s04"), score = c(82, 74, 91, 68))
+dt_b <- data.table(id = c("s01", "s02", "s03", "s05"), group = c("ctrl", "treat", "ctrl", "treat"))
+
+# Say what the join must preserve, then check it
+n_before <- nrow(dt_a)
+joined   <- merge(dt_a, dt_b, by = "id", all.x = TRUE)
+stopifnot(nrow(joined) == n_before)       # a left join keeps every left row...
+stopifnot(!anyDuplicated(dt_b$id))        # ...only if the right side's key is unique
+
+# What fell out, on each side: anti-joins
+dt_a[!dt_b, on = "id"]   # in a, not in b: s04
+dt_b[!dt_a, on = "id"]   # in b, not in a: s05
+
+# A duplicated key multiplies rows silently. Check the key before, not the count after
+dt_dup <- rbindlist(list(dt_b, dt_b[1]))
+nrow(merge(dt_a, dt_dup, by = "id"))      # 4, not 3: s01 appears twice
+stopifnot(nrow(merge(dt_a, dt_dup, by = "id")) == 4L)
+
+# A key with two types does not join at all. data.table refuses, loudly
+dt_int <- data.table(id = 1:3, x = 1:3)
+dt_chr <- data.table(id = c("1", "2", "3"), y = 4:6)
+msg <- tryCatch(merge(dt_int, dt_chr, by = "id"), error = conditionMessage)
+msg
+stopifnot(grepl("Incompatible join types", msg, fixed = TRUE))
 
 # ── Reshaping ───────────────────────────────────────────────────────────────────
 library(data.table)
@@ -756,6 +921,51 @@ nested <- lapply(cohorts, function(coh) {
   })
 })
 rbindlist(unlist(nested, recursive = FALSE))
+
+# ── Model Output as data.tables ─────────────────────────────────────────────────
+library(data.table)
+library(mgcv)
+library(lme4)
+source(here::here("R", "tidy.R"))
+
+set.seed(5)
+n  <- 200
+dt <- data.table(group = rep(sprintf("g%02d", 1:10), each = 20), age = runif(n, 10, 20))
+dt[, score   := 50 + 3 * sin(age / 3) + rnorm(n, sd = 2)]
+dt[, outcome := 10 + 0.4 * score + rnorm(10)[as.integer(factor(group))] + rnorm(n)]
+
+fits <- list(
+  linear = lm(outcome ~ score, data = dt),
+  mixed  = lmer(outcome ~ score + (1 | group), data = dt),
+  smooth = gam(score ~ s(age), data = dt)
+)
+coefs <- rbindlist(lapply(fits[c("linear", "mixed")], tidy_coef), idcol = "model")
+coefs
+smooths <- tidy_smooth(fits$smooth)
+smooths
+stopifnot(identical(names(coefs), c("model", "term", "estimate", "se")), nrow(coefs) == 4L,
+          smooths$term == "s(age)", smooths$edf > 1)
+
+# ── Identifiers Are Character ───────────────────────────────────────────────────
+library(data.table)
+library(arrow)
+
+csv <- tempfile(fileext = ".csv")
+writeLines(c("id,score", "007,52", "042,61", "100,48"), csv)
+
+fread(csv)$id                                     # 7 42 100: the zeros are gone
+ids <- fread(csv, colClasses = c(id = "character"))
+ids$id                                            # "007" "042" "100"
+
+# The damage shows up two steps later, when the id has to match something else
+paste0("sub-", fread(csv)$id)[1]                  # "sub-7": no such file, no such row
+paste0("sub-", ids$id)[1]                         # "sub-007"
+
+# Parquet keeps the type, so the decision made at the read survives every later read
+pq <- tempfile(fileext = ".parquet")
+write_parquet(ids, pq)
+back <- as.data.table(read_parquet(pq))
+stopifnot(is.character(back$id), identical(back$id, c("007", "042", "100")))
 
 # ── Parallelism: Multicore vs Multiprocess ──────────────────────────────────────
 library(data.table)
@@ -1151,4 +1361,22 @@ all_coefs <- tar_read(all_coefs, store = "_targets_branching")
 all_coefs
 stopifnot(identical(names(all_coefs), c("term", "estimate", "group")),
           identical(sort(unique(all_coefs$group)), c("A", "B")))
+
+# ── Branching: Map Over Many Inputs ─────────────────────────────────────────────
+library(targets)
+tar_make(script = "_targets_grid.R", store = "_targets_grid")
+curve <- tar_read(curve, store = "_targets_grid")
+curve
+stopifnot(nrow(curve) == 6L, identical(names(curve), c("covariate", "subset", "estimate", "n")))
+
+# ── Reports: Quarto on Top of targets ───────────────────────────────────────────
+library(targets)
+tar_make(script = "_targets_report.R")
+progress <- tar_progress()
+progress
+stopifnot(file.exists("report.html"),
+          progress$progress[progress$name == "model"]  == "skipped",
+          progress$progress[progress$name == "report"] == "completed")
+html <- paste(readLines("report.html", warn = FALSE), collapse = "\n")
+stopifnot(grepl("Outcome rises", html, fixed = TRUE), grepl("lightbox", html, fixed = TRUE))
 

@@ -59,6 +59,29 @@ test_that("parse_guide refuses an unclosed fence", {
   expect_error(parse_guide(c("```r", "x <- 1")), "never closed")
 })
 
+test_that("a four-backtick fence can hold a file that contains three-backtick fences", {
+  md <- c(
+    "<!-- example: file=report.qmd -->",
+    "````markdown",
+    "---",
+    "title: x",
+    "---",
+    "```{r}",
+    "1 + 1",
+    "```",
+    "````",
+    "",
+    "```r",
+    "y <- 2",
+    "```"
+  )
+  blocks <- parse_guide(md)
+  expect_length(blocks, 2L)
+  expect_equal(blocks[[1]]$path, "report.qmd")
+  expect_equal(blocks[[1]]$code, c("---", "title: x", "---", "```{r}", "1 + 1", "```"))
+  expect_equal(blocks[[2]]$code, "y <- 2")
+})
+
 test_that("write_project writes file blocks and a .here marker", {
   dir <- tempfile("proj-")
   write_project(parse_guide(fixture), dir)

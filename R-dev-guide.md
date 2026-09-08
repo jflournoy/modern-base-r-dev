@@ -29,7 +29,11 @@ pkgs <- c(
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
   "S7",          # OOP; experimental, so S3 stays the default (see OOP section)
-  "here"         # project-relative paths, so tests find R/ (see Testing section)
+  "here",        # project-relative paths, so tests find R/ (see Testing section)
+  "crew",        # where targets run: local workers here, a scheduler or cloud elsewhere
+  "tarchetypes", # tar_quarto(): the report as a target
+  "quarto",      # renders the report; needs the Quarto CLI on the PATH
+  "lme4"         # used in the model-output examples only
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -293,6 +297,45 @@ prices[transactions, roll = TRUE]
 
 stopifnot(nrow(merge(dt_a, dt_b, by = "id", all.x = TRUE)) == 4L,
           nrow(prices[transactions, roll = TRUE]) == 3L)
+```
+
+### Joins That Lose Rows
+
+A join has three ways to go wrong without an error. Rows drop when a key is missing on the
+other side; rows multiply when a key is duplicated on the other side; and keys that should
+match do not, because one file padded its identifiers and the other did not (see
+Identifiers Are Character, under Large Data). None of these shows in the joined table,
+which prints fine. So state what the join is supposed to do before running it, and assert
+it after. The one failure data.table refuses outright is a key with two types, and that
+error is the good outcome.
+
+```r
+library(data.table)
+
+dt_a <- data.table(id = c("s01", "s02", "s03", "s04"), score = c(82, 74, 91, 68))
+dt_b <- data.table(id = c("s01", "s02", "s03", "s05"), group = c("ctrl", "treat", "ctrl", "treat"))
+
+# Say what the join must preserve, then check it
+n_before <- nrow(dt_a)
+joined   <- merge(dt_a, dt_b, by = "id", all.x = TRUE)
+stopifnot(nrow(joined) == n_before)       # a left join keeps every left row...
+stopifnot(!anyDuplicated(dt_b$id))        # ...only if the right side's key is unique
+
+# What fell out, on each side: anti-joins
+dt_a[!dt_b, on = "id"]   # in a, not in b: s04
+dt_b[!dt_a, on = "id"]   # in b, not in a: s05
+
+# A duplicated key multiplies rows silently. Check the key before, not the count after
+dt_dup <- rbindlist(list(dt_b, dt_b[1]))
+nrow(merge(dt_a, dt_dup, by = "id"))      # 4, not 3: s01 appears twice
+stopifnot(nrow(merge(dt_a, dt_dup, by = "id")) == 4L)
+
+# A key with two types does not join at all. data.table refuses, loudly
+dt_int <- data.table(id = 1:3, x = 1:3)
+dt_chr <- data.table(id = c("1", "2", "3"), y = 4:6)
+msg <- tryCatch(merge(dt_int, dt_chr, by = "id"), error = conditionMessage)
+msg
+stopifnot(grepl("Incompatible join types", msg, fixed = TRUE))
 ```
 
 ### Reshaping
@@ -765,6 +808,105 @@ rbindlist(unlist(nested, recursive = FALSE))
 
 ---
 
+## Model Output as data.tables
+
+A fitted model is an object with its own accessor vocabulary, and every package has a
+different one: `coef(summary(fit))` for `lm()` and `lmer()`, `summary(fit)$s.table` for an
+mgcv smooth, `posterior::as_draws_df()` for anything sampled. Reports, figures, and tests
+should not know any of that. Put the extraction in one layer of small functions that return
+plain data.tables, one row per term, and have everything downstream consume those. When a
+model changes class, from `lm()` to a mixed model, or from maximum likelihood to a
+Bayesian fit, one file changes and the report does not.
+
+<!-- example: file=R/tidy.R -->
+```r
+# R/tidy.R
+library(data.table)
+
+# One row per term, for any fit whose summary() carries a coefficient matrix: lm, glm, lmer
+tidy_coef <- function(fit) {
+  co <- coef(summary(fit))
+  data.table(term = rownames(co), estimate = co[, 1], se = co[, 2])
+}
+
+# One row per smooth term, from mgcv's summary()
+tidy_smooth <- function(fit) {
+  st <- summary(fit)$s.table
+  data.table(term = rownames(st), edf = st[, "edf"], p = st[, "p-value"])
+}
+```
+
+The payoff is that fits of different classes stack, and a table comparing them is one
+`rbindlist()`:
+
+```r
+library(data.table)
+library(mgcv)
+library(lme4)
+source(here::here("R", "tidy.R"))
+
+set.seed(5)
+n  <- 200
+dt <- data.table(group = rep(sprintf("g%02d", 1:10), each = 20), age = runif(n, 10, 20))
+dt[, score   := 50 + 3 * sin(age / 3) + rnorm(n, sd = 2)]
+dt[, outcome := 10 + 0.4 * score + rnorm(10)[as.integer(factor(group))] + rnorm(n)]
+
+fits <- list(
+  linear = lm(outcome ~ score, data = dt),
+  mixed  = lmer(outcome ~ score + (1 | group), data = dt),
+  smooth = gam(score ~ s(age), data = dt)
+)
+coefs <- rbindlist(lapply(fits[c("linear", "mixed")], tidy_coef), idcol = "model")
+coefs
+smooths <- tidy_smooth(fits$smooth)
+smooths
+stopifnot(identical(names(coefs), c("model", "term", "estimate", "se")), nrow(coefs) == 4L,
+          smooths$term == "s(age)", smooths$edf > 1)
+```
+
+A Bayesian fit goes through the same layer. The draws come out of `posterior`, never out of
+the fitting package's own accessors, and the function returns a data.table of draws, one
+row per draw per variable, that `melt()` and `by =` already know how to summarise:
+
+<!-- example: skip -->
+```r
+# R/tidy.R, continued
+tidy_draws <- function(fit, variables) {
+  d <- posterior::as_draws_df(fit$fit)
+  d <- posterior::subset_draws(d, variable = variables)
+  melt(as.data.table(d), id.vars = c(".chain", ".iteration", ".draw"),
+       variable.name = "variable")
+}
+```
+
+<!-- example: file=tests/test-tidy.R -->
+```r
+# tests/test-tidy.R
+library(testthat)
+library(data.table)
+source(here::here("R", "tidy.R"))
+
+test_that("tidy_coef returns one row per term with estimate and se", {
+  fit <- lm(dist ~ speed, data = cars)
+  out <- tidy_coef(fit)
+  expect_s3_class(out, "data.table")
+  expect_named(out, c("term", "estimate", "se"))
+  expect_equal(out$term, c("(Intercept)", "speed"))
+  expect_equal(out$estimate, unname(coef(fit)))
+})
+
+test_that("tidy_smooth reports the smooth's edf", {
+  set.seed(1)
+  d   <- data.frame(x = seq(0, 10, length.out = 100))
+  d$y <- sin(d$x) + rnorm(100, sd = 0.2)
+  out <- tidy_smooth(mgcv::gam(y ~ s(x), data = d))
+  expect_equal(out$term, "s(x)")
+  expect_gt(out$edf, 1)
+})
+```
+
+---
+
 ## Large Data: Memory-Efficient Patterns
 
 When data is large (hundreds of MB to GB+), several concerns become critical:
@@ -852,6 +994,38 @@ dt[, count := as.integer(count)]  # 4 bytes vs 8 bytes per value
 
 # IDate vs Date: IDate is stored as integer, much smaller
 dt[, date_idt := as.IDate(date_str, format = "%Y-%m-%d")]
+```
+
+### Identifiers Are Character
+
+An identifier is a label, not a quantity. `fread()` cannot know that, so a column of `007`,
+`042`, `100` comes back as the integers 7, 42, 100 and the zeros are gone. Nothing fails at
+the read. The failure arrives two steps later, when the id has to match a file name, a
+second table, or a participant list that kept its zeros. Declare the type at the read,
+once, with `colClasses`, and let parquet carry it from there. A test that a padded id
+survives a round trip is cheap, and it catches the regression the day someone re-exports
+the CSV.
+
+```r
+library(data.table)
+library(arrow)
+
+csv <- tempfile(fileext = ".csv")
+writeLines(c("id,score", "007,52", "042,61", "100,48"), csv)
+
+fread(csv)$id                                     # 7 42 100: the zeros are gone
+ids <- fread(csv, colClasses = c(id = "character"))
+ids$id                                            # "007" "042" "100"
+
+# The damage shows up two steps later, when the id has to match something else
+paste0("sub-", fread(csv)$id)[1]                  # "sub-7": no such file, no such row
+paste0("sub-", ids$id)[1]                         # "sub-007"
+
+# Parquet keeps the type, so the decision made at the read survives every later read
+pq <- tempfile(fileext = ".parquet")
+write_parquet(ids, pq)
+back <- as.data.table(read_parquet(pq))
+stopifnot(is.character(back$id), identical(back$id, c("007", "042", "100")))
 ```
 
 ### Keys and Indices for Repeated Lookups
@@ -1791,6 +1965,55 @@ stopifnot(identical(names(all_coefs), c("term", "estimate", "group")),
           identical(sort(unique(all_coefs$group)), c("A", "B")))
 ```
 
+The case that comes up most in analysis is neither of those: a table of specifications,
+one row per model to fit, as in a multiverse or a specification curve. Rows are the
+natural unit, and the default iteration handles them. `map(spec)` hands each branch one
+row, and the downstream target receives the one-row results already stacked into a
+data.table, with no `iteration = "list"` and no `rbindlist()`. The rule, then: branch over
+the rows of a table with the default, and over the elements of a list with
+`iteration = "list"`. This script also runs its branches on two local workers; the lines
+that decide that are explained under Running Somewhere Else.
+
+<!-- example: file=_targets_grid.R -->
+```r
+# _targets_grid.R: a specification grid, one branch per row
+library(targets)
+library(data.table)
+tar_source("R/functions.R")
+tar_option_set(
+  packages   = "data.table",
+  controller = crew::crew_controller_local(workers = 2),
+  storage    = "worker",
+  retrieval  = "worker"
+)
+
+# One specification in, one row out. The spec's own columns come along, so the result
+# says which model it belongs to without a join
+fit_spec <- function(dt, spec) {
+  rhs <- if (spec$covariate == "none") "score_z" else paste("score_z", spec$covariate, sep = " + ")
+  d   <- if (spec$subset == "all") dt else dt[group == spec$subset]
+  fit <- lm(as.formula(paste("outcome ~", rhs)), data = d)
+  data.table(spec, estimate = coef(fit)[["score_z"]], n = nrow(d))
+}
+
+list(
+  tar_target(raw_path,   "data/raw.csv", format = "file"),
+  tar_target(raw_data,   load_raw(raw_path)),
+  tar_target(clean_data, clean(raw_data)),
+  tar_target(spec,       CJ(covariate = c("none", "age"), subset = c("all", "A", "B"))),
+  tar_target(spec_fit,   fit_spec(clean_data, spec), pattern = map(spec)),
+  tar_target(curve,      spec_fit[order(estimate)])
+)
+```
+
+```r
+library(targets)
+tar_make(script = "_targets_grid.R", store = "_targets_grid")
+curve <- tar_read(curve, store = "_targets_grid")
+curve
+stopifnot(nrow(curve) == 6L, identical(names(curve), c("covariate", "subset", "estimate", "n")))
+```
+
 </details>
 
 ### TDD and targets Together
@@ -1819,6 +2042,65 @@ The key discipline: **keep the work in functions, keep the pipeline thin**. A
 `tar_target()` command should be a single function call. If it's more than that,
 extract the logic into a named function and test it.
 
+### Running Somewhere Else
+
+A pipeline is a graph of function calls. Where those calls run is a separate decision, and
+targets keeps it separate: a `crew` controller, set once in `tar_option_set()`, launches the
+workers, and the same `_targets.R` runs on a laptop, a shared server, an HPC scheduler, or
+a cloud batch service. The controller is the only line that changes.
+
+| Where | Controller | Package |
+|---|---|---|
+| This machine, several processes | `crew_controller_local()` | `crew` |
+| A scheduler: SLURM, SGE, PBS/Torque, LSF | `crew_controller_slurm()`, `_sge()`, `_pbs()`, `_lsf()` | `crew.cluster` |
+| Cloud batch | `crew_controller_aws_batch()` | `crew.aws.batch` |
+
+The grid pipeline above already runs on two local workers. Its `tar_option_set()` call is
+the whole deployment configuration:
+
+<!-- example: skip -->
+```r
+tar_option_set(
+  packages   = "data.table",
+  controller = crew::crew_controller_local(workers = 2),
+  storage    = "worker",    # workers write their results to the store themselves
+  retrieval  = "worker"     # and read their inputs themselves
+)
+```
+
+Swap the controller and nothing else moves:
+
+<!-- example: skip -->
+```r
+# A scheduler: one worker per job, each asking for what a branch needs
+controller = crew.cluster::crew_controller_slurm(
+  workers         = 50,
+  seconds_idle    = 120,                     # release the job when there is no work
+  options_cluster = crew.cluster::crew_options_slurm(
+    memory_gigabytes_required = 8,
+    cpus_per_task             = 2,
+    time_minutes              = 60
+  )
+)
+
+# The same pipeline on a machine with no scheduler but many cores
+controller = crew::crew_controller_local(workers = 16, seconds_idle = 60)
+```
+
+Three settings matter once the workers are not the main process. `storage = "worker"` and
+`retrieval = "worker"` move data directly between workers and the store rather than through
+the main process, which is otherwise both the bottleneck and the memory ceiling.
+`memory = "transient"`, with `garbage_collection = TRUE`, drops a target's value from the
+main process once its dependents have it, which is what keeps a pipeline of fitted models
+from holding every fit at once. And a large data target should be a file, `format = "file"`
+with a parquet path, so the store holds a pointer and the workers read the file (see Binary
+Formats). A cheap target can stay on the main process with `deployment = "main"`, so no
+worker is launched to add two numbers.
+
+What does not change between backends: the functions in `R/`, their tests, the branching,
+and the store layout. That is the argument for keeping the pipeline thin. A controller swap
+is only free when nothing in `_targets.R` knows where it runs.
+
 ### Common Operations
 
 <!-- example: skip -->
@@ -1832,18 +2114,127 @@ tar_invalidate(model)
 # Delete all cached targets and start fresh
 tar_destroy()
 
-# Run in parallel — requires the `crew` package (by the targets author)
-# crew provides a unified controller API over multiple backends:
-#   crew_controller_local()  — local processes
-#   crew.cluster package adds crew_controller_slurm(), _sge(), etc. for HPC
-library(crew)
-tar_option_set(controller = crew_controller_local(workers = 4))
+# Run in parallel: a crew controller, set once. See Running Somewhere Else
+tar_option_set(controller = crew::crew_controller_local(workers = 4))
 tar_make()
 
 # Store targets in a non-default location (useful for large outputs).
 # store is a tar_config_set() setting; tar_option_set(store = ...) errors with
 # "unused argument"
 tar_config_set(store = "cache/_targets")
+```
+
+---
+
+## Reports: Quarto on Top of targets
+
+A report is the thing a reader sees, and the rule for it is the rule for the pipeline: the
+computation happens in targets, and the report reads it. A Quarto document that fits a
+model in a chunk is a pipeline with no dependency graph, no cache, and no tests, and it
+takes as long to render as the model takes to fit. Three practices follow, and the
+pipeline below does all three.
+
+**The report reads targets.** `tar_read()` and `tar_load()` in a chunk, and nothing else.
+Figures are targets too (a ggplot object stores fine), so the report renders in seconds and
+a figure can be tested before a reader sees it.
+
+**The report is a target.** `tarchetypes::tar_quarto()` renders it inside `tar_make()`, and
+because the document reads the store, targets sees the dependency: a report cannot be stale
+relative to the fit that feeds it. Set `lightbox: true` in the HTML format, so dense
+analysis figures are click-to-zoom, and `embed-resources: true`, so the file travels
+alone.
+
+**Strings a report emits are code, and tested.** A caption builder returns a declarative
+sentence, finding first and mechanics after, and its test pins that shape. A caption is
+read out of context, so it sits a notch more formal than the prose around it.
+
+<!-- example: file=R/captions.R -->
+```r
+# R/captions.R
+# A caption states the finding, then the mechanics, in one sentence
+caption_fit <- function(model, dt) {
+  b <- coef(summary(model))["score_z", ]
+  sprintf("Outcome rises %.2f per SD of score (SE %.2f, N = %d).",
+          b[["Estimate"]], b[["Std. Error"]], nrow(dt))
+}
+```
+
+<!-- example: file=tests/test-captions.R -->
+```r
+# tests/test-captions.R
+library(testthat)
+library(data.table)
+source(here::here("R", "captions.R"))
+
+test_that("caption_fit leads with the finding and ends with N", {
+  dt  <- data.table(outcome = c(1, 2, 4, 5), score_z = c(-1.2, -0.4, 0.4, 1.2))
+  cap <- caption_fit(lm(outcome ~ score_z, data = dt), dt)
+  expect_match(cap, "^Outcome rises [0-9.]+ per SD of score")
+  expect_match(cap, "N = 4\\)\\.$")
+})
+```
+
+The document itself. Four backticks fence it here only because it contains fences of its
+own:
+
+<!-- example: file=report.qmd -->
+````markdown
+---
+title: "Score and outcome"
+format:
+  html:
+    lightbox: true
+    embed-resources: true
+---
+
+```{r}
+#| include: false
+library(targets)
+library(data.table)
+source(here::here("R", "captions.R"))
+tar_load(c(model, figure, clean_data))
+```
+
+The fit is read from the pipeline; nothing here refits it.
+
+```{r}
+#| echo: false
+#| fig-cap: !expr caption_fit(model, clean_data)
+figure
+```
+````
+
+The pipeline is the minimal one from above plus one target. Because the model targets are
+already in the store, a run of this script builds nothing but the report:
+
+<!-- example: file=_targets_report.R -->
+```r
+# _targets_report.R: the minimal pipeline plus the report
+library(targets)
+library(tarchetypes)
+tar_source("R/functions.R")
+tar_option_set(packages = c("data.table", "ggplot2"))
+
+list(
+  tar_target(raw_path,    "data/raw.csv", format = "file"),
+  tar_target(raw_data,    load_raw(raw_path)),
+  tar_target(clean_data,  clean(raw_data)),
+  tar_target(model,       fit_model(clean_data)),
+  tar_target(figure,      plot_results(model, clean_data)),
+  tar_quarto(report, "report.qmd")   # depends on whatever the document tar_load()s
+)
+```
+
+```r
+library(targets)
+tar_make(script = "_targets_report.R")
+progress <- tar_progress()
+progress
+stopifnot(file.exists("report.html"),
+          progress$progress[progress$name == "model"]  == "skipped",
+          progress$progress[progress$name == "report"] == "completed")
+html <- paste(readLines("report.html", warn = FALSE), collapse = "\n")
+stopifnot(grepl("Outcome rises", html, fixed = TRUE), grepl("lightbox", html, fixed = TRUE))
 ```
 
 ---

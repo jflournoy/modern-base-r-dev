@@ -12,6 +12,7 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
+      - uses: quarto-dev/quarto-actions/setup@v2
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
@@ -28,6 +29,10 @@ jobs:
             any::here
             any::testthat
             any::targets
+            any::tarchetypes
+            any::crew
+            any::quarto
+            any::lme4
       - name: Every guide block runs and R-dev-examples.R is current
         run: Rscript check-examples.R
       - name: The checker's own tests
