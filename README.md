@@ -17,8 +17,36 @@ more terse and directive CLAUDE.md. All errors are mine.
 ## Files in this repo
 
 - [`R-dev-guide.md`](R-dev-guide.md) — the full human-readable guide
-- [`R-dev-examples.R`](R-dev-examples.R) — runnable examples
+- [`R-dev-examples.R`](R-dev-examples.R) — runnable examples, generated from the guide; do not edit by hand
 - [`CLAUDE_r-devel.md`](CLAUDE_r-devel.md) — directive instructions for Claude Code (modular, can be copied to other projects)
+- [`check-examples.R`](check-examples.R) — runs every code block in the guide and regenerates the examples file
+- [`tests/`](tests/) — the checker's own tests
+
+## Checking the guide
+
+Every fenced R block in the guide is run, in a fresh environment, by `check-examples.R`,
+and `R-dev-examples.R` is generated from the guide rather than kept in sync by hand. A
+guide that says something its own examples cannot do fails the check.
+
+```bash
+Rscript check-examples.R            # run every block; fail on any error or on drift
+Rscript check-examples.R --write    # the same, then rewrite R-dev-examples.R
+Rscript -e 'testthat::test_dir("tests")'
+```
+
+Two HTML comments control what a block does. Put either on the line before the fence.
+A block with no marker is run.
+
+```markdown
+<!-- example: skip -->             illustrative; parsed and listed, never run
+<!-- example: file=R/analysis.R --> written into the example project at that path
+```
+
+File blocks are written before anything runs, so the testing and pipeline sections are a
+real project (`R/`, `tests/`, `_targets.R`, `data/raw.csv`) that `test_dir()` and
+`tar_make()` are called on. Assertions inside the blocks (`stopifnot()`) say what the
+result must look like, so a block that runs but returns the wrong shape also fails. The
+same check runs in GitHub Actions on every push.
 
 ## Using the directives in your own project
 

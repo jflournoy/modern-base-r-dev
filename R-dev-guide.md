@@ -1,10 +1,13 @@
 # Modern R Development Guide (data.table Edition)
 
 *An opinionated guide for R development that prioritizes data.table, base R, and ggplot2.
-The tidyverse trades dependencies and a proprietary dialect for ergonomics — a reasonable 
-trade for many workflows. This guide prefers base R and tools that earn their inclusion. 
-Each guideline contains a minimal reproducible example (MRE). As long as you have the package
-installed you should be able to run the MRE. Last updated: September 2026.*
+The tidyverse trades dependencies and a proprietary dialect for ergonomics, a reasonable
+trade for many workflows. The objection this guide makes is to the dialect (a second grammar
+for operations base R and data.table already express) and to the dependency graph that
+arrives with it; it is not an objection to dependencies as such, and the approved list
+carries arrow, duckdb, and testthat without apology. Each guideline contains a minimal
+reproducible example (MRE). Every MRE is run by `check-examples.R`, which also generates
+`R-dev-examples.R` from this file. Last updated: September 2026.*
 
 ---
 
@@ -12,6 +15,7 @@ installed you should be able to run the MRE. Last updated: September 2026.*
 
 Run this once to install all packages recommended in this guide:
 
+<!-- example: skip -->
 ```r
 pkgs <- c(
   "data.table",  # core data manipulation
@@ -24,9 +28,8 @@ pkgs <- c(
   "bench",       # benchmarking
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
-  "S7",          # modern OOP — promising, still experimental (see OOP section)
-  "here",        # project-relative paths; tests need it (see Testing section)
-  "broom"        # tidy model output; used only in the examples, not a recommendation
+  "S7",          # OOP; experimental, so S3 stays the default (see OOP section)
+  "here"         # project-relative paths, so tests find R/ (see Testing section)
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -50,7 +53,8 @@ install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
 ## On Pipes: Prefer Intermediate Variables
 
 The native pipe `|>` exists. It is fine for a maximum of two steps where the
-transformation is so obvious it needs no name. That's it.
+transformation is so obvious it needs no name. That's it. The two-step limit is a house
+rule, not a measurement; the argument against longer chains follows.
 
 **Do not use `%>%`**. The magrittr pipe has different semantics in edge cases, carries
 `rlang`/tidyverse baggage, and adds a dependency for no reason.
@@ -89,6 +93,7 @@ aggregated <- filtered[, .(mean_score = mean(score), n = .N), by = .(group, year
 reshaped   <- dcast(aggregated, group ~ year, value.var = "mean_score")
 result     <- merge(reshaped, ref, by = "group", all.x = TRUE)
 result
+stopifnot(nrow(result) == 2L)
 ```
 
 Intermediate variables have costs only when they're large — in that case, use `:=`
@@ -129,11 +134,12 @@ data.table is a strong choice for data manipulation in R. It is:
 > **Version note**: This guide assumes R ≥ 4.1, which introduced the native pipe `|>`
 > and the lambda shorthand `\(x)`. Patterns here require data.table ≥ 1.13.0 (July 2020),
 > which introduced `fcase()` and `fifelse()`. `setindex()` and `patterns()` for `.SDcols`
-> have been available since v1.9.4–v1.9.6 (2014–2015). Current CRAN release: v1.18.6.1
-> (August 2026). If you're on an older install, `update.packages()` before using this guide.
+> have been available since v1.9.4–v1.9.6 (2014–2015). If you're on an older install,
+> `update.packages()` before using this guide.
 
 ### Setup
 
+<!-- example: skip -->
 ```r
 library(data.table)
 
@@ -233,6 +239,7 @@ summary_dt <- dt[, .(
   n        = .N
 ), by = .(group, year)]
 summary_dt
+stopifnot(nrow(summary_dt) == 9L)
 
 # Add group mean back to original table (no ungroup() needed)
 dt[, group_mean := mean(value), by = group]
@@ -283,6 +290,9 @@ transactions <- data.table(
 setkey(prices, id, date)
 setkey(transactions, id, date)
 prices[transactions, roll = TRUE]
+
+stopifnot(nrow(merge(dt_a, dt_b, by = "id", all.x = TRUE)) == 4L,
+          nrow(prices[transactions, roll = TRUE]) == 3L)
 ```
 
 ### Reshaping
@@ -314,12 +324,15 @@ dcast(long_dt, id + year ~ wave, value.var = "score")
 # Multiple value columns at once (add a weight column first)
 long_dt[, weight := runif(.N, 0.5, 1.5)]
 dcast(long_dt, id ~ wave, value.var = c("score", "weight"))
+stopifnot(nrow(long_dt) == 12L, ncol(dcast(long_dt, id + year ~ wave, value.var = "score")) == 5L)
 ```
 
 ### Reference Semantics: Understand What You're Doing
 
-data.table modifies by reference. This is a feature, not a bug — but it means you need
-to think about copies.
+data.table modifies by reference. This is a feature, not a bug, but it means you need to
+think about copies. The rule: modify in place inside a function that owns its object, and
+`copy()` at a function boundary when the caller's object must survive the call. Where
+in-place mutation is the contract, say so in the function's name and in its tests.
 
 ```r
 library(data.table)
@@ -345,6 +358,8 @@ add_flag <- function(d) {
 dt3 <- data.table(x = 1:3)
 add_flag(dt3)
 print(dt3)  # flag column is present
+
+stopifnot("z" %in% names(dt_shallow), !"z" %in% names(dt2_copy), "flag" %in% names(dt3))
 ```
 
 ---
@@ -572,7 +587,12 @@ ggplot(plot_dt, aes(x = cohort, y = pct_pass, ymin = ci_lo, ymax = ci_hi)) +
 
 ### Structure and Style
 
+The functions below are the ones the Testing section writes tests against, so they live
+in a file the tests can source.
+
+<!-- example: file=R/analysis.R -->
 ```r
+# R/analysis.R
 library(data.table)
 
 compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
@@ -587,10 +607,6 @@ compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
   }
 }
 
-set.seed(1)
-compute_effect_size(rnorm(50, 5), rnorm(50, 4))
-compute_effect_size(rnorm(50, 5), rnorm(50, 4), type = "glass_delta")
-
 fit_group_models <- function(dt, formula, group_col) {
   dt_list <- split(dt, by = group_col)
   fits    <- lapply(dt_list, function(d) lm(formula, data = d))
@@ -601,13 +617,35 @@ fit_group_models <- function(dt, formula, group_col) {
   rbindlist(coefs, idcol = group_col)
 }
 
+# Modifies in place: the caller's table gains score_z. The name and the tests say so.
+add_z_score <- function(dt) {
+  dt[, score_z := (score - mean(score)) / sd(score)]
+  dt
+}
+
+summarise_by_group <- function(dt) {
+  dt[, .(mean_val = mean(value)), by = group]
+}
+```
+
+```r
+library(data.table)
+source(here::here("R", "analysis.R"))
+
+set.seed(1)
+d <- compute_effect_size(rnorm(50, 5), rnorm(50, 4))
+d
+compute_effect_size(rnorm(50, 5), rnorm(50, 4), type = "glass_delta")
+
 set.seed(2)
 dt <- data.table(
   group     = rep(c("A", "B"), each = 50),
   outcome   = rnorm(100, 10, 2),
   predictor = rnorm(100, 5, 1)
 )
-fit_group_models(dt, outcome ~ predictor, "group")
+coefs <- fit_group_models(dt, outcome ~ predictor, "group")
+coefs
+stopifnot(d > 0, nrow(coefs) == 4L, identical(names(coefs), c("group", "term", "estimate")))
 ```
 
 ### Avoid Growing Objects
@@ -676,7 +714,9 @@ fit_group <- function(group_dt) {
 # Not as.data.table(co, keep.rownames = "term"): on a named vector that silently
 # yields columns V1 and V2, and the "term" name is ignored.
 dt_list <- split(dt, by = "group")
-rbindlist(lapply(dt_list, fit_group), idcol = "group")
+coefs   <- rbindlist(lapply(dt_list, fit_group), idcol = "group")
+coefs
+stopifnot(identical(names(coefs), c("group", "term", "estimate")))
 
 # ── use.names: stack columns by name, not position ────────────────────────
 
@@ -693,6 +733,7 @@ run_simulation <- function(sim_id) {
 }
 sim_results <- rbindlist(lapply(seq_len(50), run_simulation))
 sim_results
+stopifnot(nrow(sim_results) == 50L)
 
 # ── Composing with parallelism: swap lapply for mclapply ──────────────────
 # The function is identical — only the mapping changes.
@@ -731,6 +772,7 @@ unnecessary copies, column-wise reads, and compute-before-load filtering.
 
 ### Read Only What You Need
 
+<!-- example: skip -->
 ```r
 # fread is the right tool — it's fast and flexible
 dt <- fread("big.csv")
@@ -755,6 +797,7 @@ new one is allocated. The copies come from assigning *into* an
 existing column. `df[i, "col"] <- v` duplicates the whole column before writing, and
 `tracemem()` will show it. data.table's `:=` writes into the existing column — no copy.
 
+<!-- example: skip -->
 ```r
 # Base R: a subassignment copies the whole column first
 df[df$value < 0, "value"] <- 0
@@ -775,6 +818,7 @@ dt[, `:=`(
 
 ### Avoid Unnecessary Copies
 
+<!-- example: skip -->
 ```r
 # Bad: copy, filter, copy again
 sub_dt  <- dt[group == "A"]             # copy
@@ -793,6 +837,7 @@ group_a <- copy(dt[group == "A"])  # explicit, documented
 
 ### Column Types Matter
 
+<!-- example: skip -->
 ```r
 # After reading, check types — fread infers but sometimes gets it wrong
 dt[, lapply(.SD, class)]
@@ -814,6 +859,7 @@ dt[, date_idt := as.IDate(date_str, format = "%Y-%m-%d")]
 If you'll be subsetting or joining on a column repeatedly, set a key. This sorts
 the data in place (memory-efficient radix sort) and enables binary search lookups.
 
+<!-- example: skip -->
 ```r
 # Set key for repeated i-subsetting
 setkey(dt, id)
@@ -871,13 +917,21 @@ sim_results
 # ── Multiprocess (socket): parLapply ──────────────────────────────────────
 # Use when: Windows, isolated workers needed, or distributing across nodes
 cl <- makeCluster(n_cores)
-clusterExport(cl, varlist = "run_simulation")
+# envir defaults to the global environment, which is not where run_simulation lives
+# when this code runs inside a function or a sourced block
+clusterExport(cl, varlist = "run_simulation", envir = environment())
 invisible(clusterEvalQ(cl, library(data.table)))
-clusterSetRNGStream(cl, iseed = 42)
+# Not clusterSetRNGStream(cl, iseed = 42) here: it switches the workers to the
+# L'Ecuyer-CMRG generator, and set.seed(sim_id) inside the worker then draws different
+# numbers than the same call under the default generator. Use it when the worker does
+# not seed itself; seeding in the worker and streams on the cluster do not combine.
 
 sim_results2 <- rbindlist(parLapply(cl, seq_len(50), run_simulation))
 stopCluster(cl)
 sim_results2
+
+# Both routes seed inside the worker from sim_id, so they agree exactly
+stopifnot(identical(sim_results, sim_results2))
 
 # Quick check before parallelising — is one item worth the overhead?
 system.time(run_simulation(1))
@@ -889,16 +943,17 @@ system.time(run_simulation(1))
 
 Never re-read a CSV in an iterative workflow. After the first read, write parquet.
 
+One format, not two. Splitting the job across two formats, one for working data and one
+for storage, has a failure mode of its own. A "working" file has a way of becoming the
+shared one, and the moment it does, the tier you chose months ago is a format mismatch
+nobody looks for. One format has no such seam. That is the reason for the rule; what
+follows is why the one format is parquet.
+
 Feather (Arrow IPC) is faster to read, and that is the only argument for it. Against it,
 the [Arrow project's own FAQ](https://arrow.apache.org/faq/) says the IPC format does not
 prioritize long-term storage, that parquet files are often much smaller, and that parquet
 may be the better choice even for short-term caching when disk or network is slow. And
 parquet is what everything else reads (DuckDB, Polars, Spark, BigQuery, pandas).
-
-Splitting the job across two formats, one for working data and one for storage, has a
-failure mode of its own. A "working" file has a way of becoming the shared one, and the
-moment it does, the tier you chose months ago is a format mismatch nobody looks for. One
-format has no such seam.
 
 Feather keeps a narrow case: a short-lived handoff between two processes on the same
 machine, written and consumed inside one run, never persisted. Outside that, use parquet.
@@ -922,6 +977,7 @@ dt <- as.data.table(read_parquet(parquet_path))
 
 # Column selection on read — only the named columns leave the file
 dt_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "outcome")))
+stopifnot(nrow(dt) == 1000L, identical(names(dt_sub), c("id", "outcome")))
 
 # Compression is per-file; zstd is a good default when size matters
 write_parquet(dt_raw, parquet_path, compression = "zstd")
@@ -1004,9 +1060,15 @@ result_parquet <- as.data.table(dbGetQuery(con, sprintf("
   SELECT   cohort, AVG(outcome) AS mean_outcome, COUNT(*) AS n
   FROM     read_parquet('%s/**/*.parquet')
   WHERE    year = 2021
+    AND    \"group\" = 'treatment'
   GROUP BY cohort
 ", part_dir)))
 result_parquet
+
+# The in-memory table and the partitioned files answer the same query the same way.
+# all.equal(), not identical(): the files are summed in a different order, and floating
+# point addition is not associative
+stopifnot(isTRUE(all.equal(result_dt[order(cohort)], result_parquet[order(cohort)])))
 
 dbDisconnect(con, shutdown = TRUE)
 ```
@@ -1067,6 +1129,7 @@ dt[, category := fcase(
 # fifelse: fast type-stable ifelse
 dt[, verdict := fifelse(score > threshold, "pass", "fail")]
 dt
+stopifnot(all(dt$verdict %in% c("pass", "fail")), all(dt$category %in% c("high", "medium", "low")))
 ```
 
 ---
@@ -1128,17 +1191,17 @@ p <- new("Participant",
 n_waves(p)
 ```
 
-### S7: Promising but Still Experimental
+### S7: Learn It, Default to S3
 
 S7 offers S4-like structure with S3-like simplicity, and it comes out of the R Consortium
 working group (R-Core, Bioconductor, and Posit are all represented) as a proposed successor
 to S3 and S4. That makes it the right thing to learn.
 
-It is not yet the safe default for a package you intend to keep. As of September 2026 S7
-is at version 0.2.2, is badged `lifecycle: experimental`, and its own README says the
-authors "reserve the right" to make breaking changes. Use it in a new package when you
-want what it offers and can absorb an API change. Reach for S3 when you want the class to
-still work untouched in three years.
+It is not the default. S7 is badged `lifecycle: experimental`, and its own README says the
+authors "reserve the right" to make breaking changes. The rule is S3 unless a class needs
+what S3 cannot give (validated, typed properties; dispatch on more than one argument), and
+the reason is written down beside the class definition. A class built on S7 is a class you
+have agreed to revisit when the API moves.
 
 ```r
 library(S7)
@@ -1158,7 +1221,9 @@ x@lo
 x@hi
 
 # Validator fires on invalid input
-tryCatch(Interval(lo = 5, hi = 1), error = function(e) conditionMessage(e))
+msg <- tryCatch(Interval(lo = 5, hi = 1), error = function(e) conditionMessage(e))
+msg
+stopifnot(grepl("@hi must be >= @lo", msg, fixed = TRUE))
 ```
 
 ---
@@ -1225,21 +1290,31 @@ bench::mark(
 
 ### Dependency Philosophy
 
-Every dependency you add is a dependency your users carry. Be deliberate.
+Every dependency you add is a dependency your users carry, so each one should be able to
+say why it is there. The objection this guide makes is to the tidyverse dialect, a second
+grammar for operations base R and data.table already express, and to the dependency graph
+that arrives with it. It is not an objection to dependencies as such. A package earns a
+place on the list by meeting three criteria: (i) it does something base R and data.table do
+not, or does it in a cross-language format or at a speed that matters; (ii) it does not
+bring its own grammar for things you can already write; (iii) it is maintained, and its
+lifecycle is stated. The approved list, each with the criterion it meets:
 
 ```r
-# Worth adding:
-# - data.table: for data manipulation (faster, lighter than dplyr)
-# - ggplot2:    for visualization
-# - stringr:    clean string API, fine in isolation (backed by stringi)
-# - stringi:    ICU-backed Unicode/locale-aware string ops, heavy lifting
-# - arrow:      parquet I/O, lazy datasets, zero-copy Arrow↔DuckDB
-# - duckdb:     in-process SQL, out-of-core analytics, queries parquet directly
-# - Rcpp:       for C++ extensions
-# - Matrix:     for sparse matrices
-# - lme4/brms:  for modeling
-# - lubridate:  for heavy date work (isolated, focused)
-# - here:       project-root-relative paths, so tests find R/ from tests/
+# - data.table: reference semantics and a grouping grammar base R lacks; no dependencies
+# - ggplot2:    a grammar of graphics base graphics does not have, and it stands alone
+# - stringr:    one consistent string API; a thin layer over stringi
+# - stringi:    ICU-backed Unicode and locale operations base R cannot do
+# - arrow:      parquet, a cross-language on-disk format, and lazy datasets
+# - duckdb:     out-of-core SQL over parquet, zero-copy with arrow
+# - here:       project-root paths that survive test_dir() changing the working directory
+# - lubridate:  date arithmetic base R makes error-prone; heavy date work only
+# - S7:         validated, typed classes; experimental, so justified per class
+# - testthat:   the test runner
+# - targets:    the dependency graph for a multi-step analysis
+# - parallel:   ships with R
+# - Rcpp:       C++ once profiling has shown R is the bottleneck
+# - Matrix:     sparse matrices
+# - lme4/brms:  modeling
 
 # Not worth adding to avoid writing 3 lines of base R:
 # - dplyr   (use data.table)
@@ -1274,8 +1349,11 @@ dt <- data.table(y = rnorm(50), x1 = rnorm(50), x2 = rnorm(50))
 fit_model(dt, "y", c("x1", "x2"))
 
 # Validation fires correctly
-tryCatch(fit_model(dt, "y", c("x1", "missing_col")), error = conditionMessage)
-tryCatch(fit_model(as.data.frame(dt), "y", "x1"),    error = conditionMessage)
+msg_col <- tryCatch(fit_model(dt, "y", c("x1", "missing_col")), error = conditionMessage)
+msg_cls <- tryCatch(fit_model(as.data.frame(dt), "y", "x1"),    error = conditionMessage)
+msg_col
+msg_cls
+stopifnot(grepl("missing_col", msg_col, fixed = TRUE), grepl("must be a data.table", msg_cls, fixed = TRUE))
 
 # warning() for recoverable issues
 dt_with_na <- copy(dt)
@@ -1304,6 +1382,7 @@ net for refactoring. Use it for any non-trivial function.
 
 ### Setup
 
+<!-- example: skip -->
 ```r
 install.packages(c("testthat", "here"))
 ```
@@ -1311,11 +1390,14 @@ install.packages(c("testthat", "here"))
 For a standalone script workflow (no package), put tests in a `tests/` directory
 and run them with `testthat::test_dir("tests/")`. Source the code under test with
 `here::here()`, not a path relative to the project root: `test_dir()` and `test_file()`
-change the working directory to `tests/` while the tests run. For package development,
-`usethis::use_testthat()` wires everything up.
+change the working directory to `tests/` while the tests run. That is the one dependency
+this layout costs; the alternative is to make the project a package, which is the layout
+`test_dir()` assumes and what `usethis::use_testthat()` wires up. Either is fine. What is
+not fine is a test file that only passes when run from one particular directory.
 
 ```
 project/
+├── .here              # empty file; marks the root for here::here()
 ├── R/
 │   └── analysis.R
 └── tests/
@@ -1327,6 +1409,7 @@ project/
 <details>
 <summary>Example test file</summary>
 
+<!-- example: file=tests/test-analysis.R -->
 ```r
 # tests/test-analysis.R
 library(testthat)
@@ -1360,6 +1443,7 @@ test_that("compute_effect_size handles equal vectors", {
 
 ### Core Expectations
 
+<!-- example: skip -->
 ```r
 # Equality
 expect_equal(result, expected)           # numeric: tolerance sqrt(.Machine$double.eps), ~1.5e-8
@@ -1393,7 +1477,13 @@ expect_snapshot(print(my_object))        # writes/compares a .snap file
 <details>
 <summary>Reference semantics and groupwise correctness tests</summary>
 
+<!-- example: file=tests/test-datatable.R -->
 ```r
+# tests/test-datatable.R
+library(testthat)
+library(data.table)
+source(here::here("R", "analysis.R"))
+
 # ── Test that := does not affect the caller's object ──────────────────────
 test_that("add_z_score does not modify input by reference", {
   dt <- data.table(score = c(1, 2, 3, 4, 5))
@@ -1426,8 +1516,7 @@ testthat::test_dir("tests/")
 # Run a single file
 testthat::test_file("tests/test-analysis.R")
 
-# In a package
-devtools::test()
+# In a package: devtools::test()
 
 # Run a subset of files: filter is a regex on the file name with "test-" and ".R"
 # stripped — not on test descriptions. This runs tests/test-analysis.R only
@@ -1440,7 +1529,13 @@ Test the contract of a function — its inputs, outputs, and error conditions �
 not its implementation. If the body changes but the contract holds, your tests
 should still pass.
 
+<!-- example: file=tests/test-models.R -->
 ```r
+# tests/test-models.R
+library(testthat)
+library(data.table)
+source(here::here("R", "analysis.R"))
+
 # Good: tests the contract
 test_that("fit_group_models returns one row per group per term", {
   dt <- data.table(
@@ -1472,6 +1567,7 @@ a principled dependency graph. Re-run the pipeline: only outdated targets execut
 
 ### Setup
 
+<!-- example: skip -->
 ```r
 install.packages("targets")
 ```
@@ -1491,8 +1587,9 @@ project/
 ### A Minimal Pipeline
 
 <details>
-<summary>_targets.R, R/functions.R, and common commands</summary>
+<summary>_targets.R, R/functions.R, the data, and common commands</summary>
 
+<!-- example: file=_targets.R -->
 ```r
 # _targets.R
 library(targets)
@@ -1505,17 +1602,19 @@ tar_option_set(packages = c("data.table", "ggplot2"))
 
 # Define the pipeline as a list of tar_target() calls
 list(
-  tar_target(raw_data,    load_raw("data/raw.csv")),   # reads file
-  tar_target(clean_data,  clean(raw_data)),             # depends on raw_data
-  tar_target(model,       fit_model(clean_data)),        # depends on clean_data
+  tar_target(raw_path,    "data/raw.csv", format = "file"),  # rerun if the file changes
+  tar_target(raw_data,    load_raw(raw_path)),               # depends on raw_path
+  tar_target(clean_data,  clean(raw_data)),                  # depends on raw_data
+  tar_target(model,       fit_model(clean_data)),            # depends on clean_data
   tar_target(figure,      plot_results(model, clean_data))
 )
 ```
 
+<!-- example: file=R/functions.R -->
 ```r
 # R/functions.R
 load_raw <- function(path) {
-  as.data.table(fread(path))
+  fread(path)
 }
 
 clean <- function(dt) {
@@ -1530,12 +1629,37 @@ fit_model <- function(dt) {
 }
 
 plot_results <- function(model, dt) {
-  # returns a ggplot object
-  ...
+  dt <- copy(dt)
+  dt[, fitted := fitted(model)]
+  ggplot(dt, aes(x = score_z, y = outcome, colour = group)) +
+    geom_point() +
+    geom_line(aes(y = fitted)) +
+    theme_bw()
 }
 ```
 
+A dozen rows of data, one of them with a missing outcome for `clean()` to drop:
+
+<!-- example: file=data/raw.csv -->
+```csv
+id,group,age,score,outcome
+1,A,21,52,10.1
+2,A,25,61,11.4
+3,A,30,48,9.2
+4,A,34,70,12.8
+5,A,41,55,10.9
+6,A,45,66,
+7,B,22,58,9.8
+8,B,27,63,10.7
+9,B,31,45,8.9
+10,B,36,72,12.1
+11,B,40,50,9.5
+12,B,44,68,11.6
+```
+
 ```r
+library(targets)
+
 # Run the pipeline — only outdated targets execute
 tar_make()
 
@@ -1544,9 +1668,11 @@ tar_read(clean_data)    # load a target's value into session
 tar_load(model)         # load into environment by name
 
 # Check pipeline status
-tar_visnetwork()        # dependency graph in the Viewer
-tar_outdated()          # which targets need to rerun
+tar_outdated()          # which targets need to rerun; nothing, right after tar_make()
 tar_manifest()          # table of all targets and their commands
+# tar_visnetwork()      # dependency graph in the Viewer; needs the visNetwork package
+
+stopifnot(length(tar_outdated()) == 0L, inherits(model, "lm"), nrow(tar_read(clean_data)) == 11L)
 ```
 
 </details>
@@ -1554,8 +1680,10 @@ tar_manifest()          # table of all targets and their commands
 ### File Targets: Track Input and Output Files
 
 When a target reads or writes a file, declare it with `format = "file"` so
-targets tracks the file's hash, not just whether the code changed.
+targets tracks the file's hash, not just whether the code changed. The minimal pipeline
+above already does this for its input; the output-file form is the second target here.
 
+<!-- example: skip -->
 ```r
 list(
   # Input file: rerun if the CSV changes on disk
@@ -1590,8 +1718,10 @@ number of items isn't known until a prior target runs.
 <details>
 <summary>Static and dynamic branching examples</summary>
 
+Static branching, with the inputs known when the pipeline is written:
+
+<!-- example: skip -->
 ```r
-# ── Static branching: known inputs ────────────────────────────────────────
 list(
   tar_target(
     model_A,
@@ -1602,19 +1732,27 @@ list(
     fit_subgroup(clean_data, group = "B")
   )
 )
+```
 
-# ── Dynamic branching: inputs determined at runtime ────────────────────────
+Dynamic branching, as a complete second pipeline script over the same functions and data:
+
+<!-- example: file=_targets_branching.R -->
+```r
+# _targets_branching.R
+library(targets)
+tar_source("R/functions.R")
+tar_option_set(packages = "data.table")
 
 # One function per branch. It carries the group label in its output, because the
 # branch names targets generates are hashes, not labels.
 tidy_group <- function(dt) {
-  fit <- lm(outcome ~ score_z, data = dt)
-  out <- as.data.table(broom::tidy(fit))
-  out[, group := dt$group[1]]
-  out
+  co <- coef(lm(outcome ~ score_z, data = dt))
+  data.table(term = names(co), estimate = unname(co), group = dt$group[1])
 }
 
 list(
+  tar_target(raw_path,   "data/raw.csv", format = "file"),
+  tar_target(raw_data,   load_raw(raw_path)),
   tar_target(clean_data, clean(raw_data)),
 
   # Split into a list of data.tables — one per group. iteration = "list" makes
@@ -1642,23 +1780,32 @@ list(
 )
 ```
 
+A second script needs its own store, or it would invalidate the first pipeline's:
+
+```r
+library(targets)
+tar_make(script = "_targets_branching.R", store = "_targets_branching")
+all_coefs <- tar_read(all_coefs, store = "_targets_branching")
+all_coefs
+stopifnot(identical(names(all_coefs), c("term", "estimate", "group")),
+          identical(sort(unique(all_coefs$group)), c("A", "B")))
+```
+
 </details>
 
 ### TDD and targets Together
 
 Write and test your functions in isolation with testthat. The pipeline wires
-them together — it is not a substitute for function-level tests.
+them together — it is not a substitute for function-level tests. `clean()` in
+`R/functions.R` above is a pure function; its test is:
 
+<!-- example: file=tests/test-functions.R -->
 ```r
-# R/functions.R — pure functions, easy to test
-clean <- function(dt) {
-  dt <- copy(dt)
-  dt <- dt[!is.na(outcome)]
-  dt[, score_z := (score - mean(score)) / sd(score)]
-  dt
-}
-
 # tests/test-functions.R — test the function, not the pipeline
+library(testthat)
+library(data.table)
+source(here::here("R", "functions.R"))
+
 test_that("clean removes NA rows and adds score_z", {
   dt <- data.table(outcome = c(1, NA, 3), score = c(10, 20, 30))
   result <- clean(dt)
@@ -1674,6 +1821,7 @@ extract the logic into a named function and test it.
 
 ### Common Operations
 
+<!-- example: skip -->
 ```r
 # Add targets and testthat to your package list
 tar_option_set(packages = c("data.table", "ggplot2", "stringr"))
@@ -1702,6 +1850,7 @@ tar_config_set(store = "cache/_targets")
 
 ## Naming and Style
 
+<!-- example: skip -->
 ```r
 # snake_case everywhere
 # Variables: nouns
