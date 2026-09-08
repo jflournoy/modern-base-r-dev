@@ -1274,6 +1274,9 @@ bench::mark(
 # - S7:         validated, typed classes; experimental, so justified per class
 # - testthat:   the test runner
 # - targets:    the dependency graph for a multi-step analysis
+# - tarchetypes: tar_quarto(), so the report is a target and cannot go stale
+# - quarto:     renders the report from R; the Quarto CLI does the work
+# - crew:       where targets run; the same pipeline on a laptop, a scheduler, or a cloud
 # - parallel:   ships with R
 # - Rcpp:       C++ once profiling has shown R is the bottleneck
 # - Matrix:     sparse matrices

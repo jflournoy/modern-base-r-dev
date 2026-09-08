@@ -33,8 +33,10 @@ the reasons behind the rules, the patterns, and runnable examples, see
 | `S7` | OOP only with a written reason; S3 is the default. S7 is experimental |
 | `testthat` | Unit testing |
 | `targets` | Pipeline management |
+| `tarchetypes` | `tar_quarto()`: the report as a target |
+| `quarto` | Rendering reports; needs the Quarto CLI on the PATH |
 | `parallel` | Multicore, base R |
-| `crew` / `crew.cluster` | Parallel backends for targets |
+| `crew` / `crew.cluster` | Where targets run: local workers, or a scheduler |
 
 No tidyverse packages (dplyr, purrr, tidyr, readr, tibble, forcats). No fst. Justify anything
 not on this list before using it.
