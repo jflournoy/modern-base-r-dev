@@ -33,6 +33,17 @@ jobs:
             any::crew
             any::quarto
             any::lme4
+            any::posterior
+            stan-dev/cmdstanr
+      - name: Cache CmdStan
+        id: cmdstan
+        uses: actions/cache@v4
+        with:
+          path: ~/.cmdstan
+          key: cmdstan-${{ runner.os }}-2.38.0
+      - name: Install CmdStan
+        if: steps.cmdstan.outputs.cache-hit != 'true'
+        run: Rscript -e 'cmdstanr::install_cmdstan(version = "2.38.0", cores = 2)'
       - name: Every guide block runs and R-dev-examples.R is current
         run: Rscript check-examples.R
       - name: The checker's own tests

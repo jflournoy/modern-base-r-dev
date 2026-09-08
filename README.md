@@ -48,6 +48,18 @@ real project (`R/`, `tests/`, `_targets.R`, `data/raw.csv`) that `test_dir()` an
 result must look like, so a block that runs but returns the wrong shape also fails. The
 same check runs in GitHub Actions on every push.
 
+Nothing in the guide is only sketched. The Bayesian block fits a model through cmdstanr,
+so the check needs CmdStan: on the host, `cmdstanr::install_cmdstan()`; in CI, a cached
+install. The other route is the container the Bayesian work runs in anyway:
+
+```bash
+./check-in-container.sh            # verse-cmdstan plus targets, crew, and Quarto tooling
+./check-in-container.sh --write
+```
+
+`Dockerfile.check` is a thin layer over `jflournoy/verse-cmdstan` that adds the packages
+the checker needs and nothing else; the script builds it once and reuses it.
+
 ## Using the directives in your own project
 
 ### Standalone (rename to CLAUDE.md)

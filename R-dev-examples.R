@@ -64,7 +64,31 @@ tidy_coef <- function(fit) {
 tidy_smooth <- function(fit) {
   st <- summary(fit)$s.table
   data.table(term = rownames(st), edf = st[, "edf"], p = st[, "p-value"])
+}
+
+# One row per draw per variable, from anything posterior can read: a CmdStanMCMC's
+# $draws(), a brmsfit's $fit, or a draws object. Never the fitting package's accessors
+tidy_draws <- function(draws, variables) {
+  d <- posterior::subset_draws(posterior::as_draws(draws), variable = variables)
+  melt(as.data.table(posterior::as_draws_df(d)),
+       id.vars = c(".chain", ".iteration", ".draw"), variable.name = "variable")
 })---", "R/tidy.R")
+
+# ── file: stan/normal.stan ──────────────────────────────────────────────────────
+dir.create("stan", recursive = TRUE, showWarnings = FALSE)
+writeLines(r"---(data {
+  int<lower=0> N;
+  vector[N] y;
+}
+parameters {
+  real mu;
+  real<lower=0> sigma;
+}
+model {
+  mu ~ normal(0, 5);
+  sigma ~ normal(0, 2);
+  y ~ normal(mu, sigma);
+})---", "stan/normal.stan")
 
 # ── file: tests/test-tidy.R ─────────────────────────────────────────────────────
 dir.create("tests", recursive = TRUE, showWarnings = FALSE)
@@ -89,6 +113,14 @@ test_that("tidy_smooth reports the smooth's edf", {
   out <- tidy_smooth(mgcv::gam(y ~ s(x), data = d))
   expect_equal(out$term, "s(x)")
   expect_gt(out$edf, 1)
+})
+
+test_that("tidy_draws gives one row per draw per variable", {
+  ex  <- posterior::example_draws()     # eight schools: mu, tau, theta[1:8]
+  out <- tidy_draws(ex, c("mu", "tau"))
+  expect_named(out, c(".chain", ".iteration", ".draw", "variable", "value"))
+  expect_equal(nrow(out), 2 * posterior::ndraws(ex))
+  expect_equal(sort(unique(as.character(out$variable))), c("mu", "tau"))
 }))---", "tests/test-tidy.R")
 
 # ── file: tests/test-analysis.R ─────────────────────────────────────────────────
@@ -946,6 +978,24 @@ smooths
 stopifnot(identical(names(coefs), c("model", "term", "estimate", "se")), nrow(coefs) == 4L,
           smooths$term == "s(age)", smooths$edf > 1)
 
+# ── Model Output as data.tables ─────────────────────────────────────────────────
+library(data.table)
+library(cmdstanr)
+source(here::here("R", "tidy.R"))
+
+set.seed(6)
+y   <- rnorm(50, mean = 3, sd = 1.5)
+mod <- cmdstan_model("stan/normal.stan")
+fit <- mod$sample(data = list(N = length(y), y = y), chains = 2, iter_warmup = 300,
+                  iter_sampling = 300, refresh = 0, seed = 6)
+
+draws <- tidy_draws(fit$draws(), c("mu", "sigma"))
+draws[, .(mean = mean(value), lo = quantile(value, 0.05), hi = quantile(value, 0.95)),
+      by = variable]
+stopifnot(identical(names(draws), c(".chain", ".iteration", ".draw", "variable", "value")),
+          nrow(draws) == 2L * 600L,
+          abs(draws[variable == "mu", mean(value)] - 3) < 0.6)
+
 # ── Identifiers Are Character ───────────────────────────────────────────────────
 library(data.table)
 library(arrow)
@@ -1281,6 +1331,8 @@ bench::mark(
 # - Rcpp:       C++ once profiling has shown R is the bottleneck
 # - Matrix:     sparse matrices
 # - lme4/brms:  modeling
+# - cmdstanr:   the Stan backend; posterior reads its draws
+# - posterior:  draws and summaries from any Bayesian fit, independent of the backend
 
 # Not worth adding to avoid writing 3 lines of base R:
 # - dplyr   (use data.table)

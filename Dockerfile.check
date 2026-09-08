@@ -1,0 +1,19 @@
+# The guide's examples, run inside the container the Bayesian work actually uses.
+#
+# jflournoy/verse-cmdstan carries R, CmdStan, cmdstanr, brms, posterior, arrow, duckdb,
+# and the Quarto CLI. This layer adds only what the checker needs beyond that. Build and
+# run it with check-in-container.sh; nothing here is meant to be typed by hand.
+FROM jflournoy/verse-cmdstan:latest
+
+RUN Rscript -e 'install.packages(c("bench", "targets", "tarchetypes", "crew", "quarto"))' \
+ && Rscript -e 'for (p in c("bench", "targets", "tarchetypes", "crew", "quarto")) stopifnot(requireNamespace(p, quietly = TRUE))'
+
+# The base image's lme4 binary was built against an older Matrix, and lmer() fails with
+# "function 'cholmod_factor_ldetA' not provided by package 'Matrix'". Rebuilding lme4
+# against the Matrix that is actually installed is the documented fix; it belongs in the
+# base image, and lives here until it gets there. The repo is named because the image's
+# default repo serves binaries even when type = "source" is asked for.
+RUN Rscript -e 'install.packages("lme4", repos = "https://cloud.r-project.org", type = "source")' \
+ && Rscript -e 'invisible(lme4::lmer(Reaction ~ Days + (Days | Subject), lme4::sleepstudy))'
+
+WORKDIR /work
