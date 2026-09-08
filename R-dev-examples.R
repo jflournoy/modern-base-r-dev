@@ -1,5 +1,5 @@
 # Modern R Development Guide — Runnable Examples
-# Companion to modern-r-dev_jflournoy.md
+# Companion to R-dev-guide.md
 # Each section is self-contained and can be run independently.
 
 # ── Package Installation ──────────────────────────────────────────────────────
@@ -9,14 +9,14 @@ pkgs <- c(
   "ggplot2",     # visualization
   "stringr",     # string operations (consistent API)
   "stringi",     # ICU-backed Unicode/locale string ops
-  "arrow",       # feather + parquet I/O, lazy datasets
+  "arrow",       # parquet I/O, lazy datasets
   "duckdb",      # in-process SQL, out-of-core analytics
   "profvis",     # profiling
   "bench",       # benchmarking
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
-  "S7",          # modern OOP for new package development
-  "broom"        # tidy model output (used in lapply+rbindlist examples)
+  "S7",          # modern OOP — promising, still experimental (see OOP section)
+  "broom"        # tidy model output; used only in the examples, not a recommendation
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -106,14 +106,15 @@ dt[, c("a", "b") := .(x + y, y - z)]
 
 # Conditional assignment
 dt[group == "A", flag := TRUE]
-dt[, label := ifelse(score > 0.5, "high", "low")]
+dt[, label := fifelse(score > 0.5, "high", "low")]  # fifelse is type-stable
 
 # Delete a column
 dt[, new_col := NULL]
 
 # Apply a function to multiple columns by name
 cols <- c("x", "y", "z")
-dt[, (cols) := lapply(.SD, scale), .SDcols = cols]
+dt[, (cols) := lapply(.SD, function(x) as.numeric(scale(x))), .SDcols = cols]
+# as.numeric() drops the scaled:center / scaled:scale attributes scale() attaches
 dt
 
 
@@ -415,6 +416,7 @@ ggplot(plot_dt, aes(x = cohort, y = pct_pass, ymin = ci_lo, ymax = ci_hi)) +
 library(data.table)
 
 compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
+  if (!is.numeric(x) || !is.numeric(y)) stop("`x` and `y` must be numeric")
   type      <- match.arg(type)
   pooled_sd <- sqrt(((length(x) - 1) * var(x) + (length(y) - 1) * var(y)) /
                     (length(x) + length(y) - 2))
@@ -489,7 +491,10 @@ rbindlist(results)
 
 # idcol: label which split produced each row
 fit_group <- function(group_dt) {
-  as.data.table(coef(lm(score ~ 1, data = group_dt)), keep.rownames = "term")
+  co <- coef(lm(score ~ 1, data = group_dt))
+  data.table(term = names(co), estimate = unname(co))
+  # Not as.data.table(co, keep.rownames = "term"): on a named vector that silently
+  # yields columns V1 and V2, and the "term" name is ignored.
 }
 dt_list <- split(dt, by = "group")
 rbindlist(lapply(dt_list, fit_group), idcol = "group")
@@ -601,7 +606,7 @@ dt_meta[dt]  # keyed join
 
 # Secondary index — doesn't reorder the table
 setindex(dt, group)
-dt[.("treatment"), on = "group"]
+dt[.("treatment"), on = "group"]  # on = is required — without a key or on=, this errors
 
 
 # ── Parallelism ───────────────────────────────────────────────────────────────
@@ -619,8 +624,10 @@ run_simulation <- function(sim_id) {
 
 # mclapply (fork-based, Unix/Mac)
 # WARNING: unstable inside RStudio/Positron on macOS — run from terminal if hangs occur
-sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores,
-                                  mc.set.seed = TRUE))
+# Reproducible because run_simulation() seeds itself from sim_id. mc.set.seed is TRUE by
+# default and does not get you this — it seeds children from time and PID. Seed inside the
+# worker, or set RNGkind("L'Ecuyer-CMRG") before set.seed().
+sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores))
 sim_results
 
 # parLapply (socket cluster, works on Windows)
@@ -637,7 +644,7 @@ sim_results2
 system.time(run_simulation(1))
 
 
-# ── Binary Formats: Feather and Parquet ──────────────────────────────────────
+# ── Binary Formats: Use Parquet ──────────────────────────────────────────────
 
 library(data.table)
 library(arrow)
@@ -650,19 +657,16 @@ dt_raw <- data.table(
   date    = seq.Date(as.Date("2022-01-01"), by = "day", length.out = 1000)
 )
 
-# Feather: fast reads, good for iterative work
-feather_path <- tempfile(fileext = ".arrow")
-write_feather(dt_raw, feather_path)
-dt <- as.data.table(read_feather(feather_path))
-
-# Column selection on read
-dt_sub <- as.data.table(read_feather(feather_path, col_select = c("id", "outcome")))
-
-# Parquet: best compression, good for storage and sharing
+# Parquet: the default for anything on disk
 parquet_path <- tempfile(fileext = ".parquet")
 write_parquet(dt_raw, parquet_path)
-dt2     <- as.data.table(read_parquet(parquet_path))
-dt2_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "group")))
+dt <- as.data.table(read_parquet(parquet_path))
+
+# Column selection on read — only the named columns leave the file
+dt_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "outcome")))
+
+# Compression is per-file; zstd is a good default when size matters
+write_parquet(dt_raw, parquet_path, compression = "zstd")
 
 
 # ── Arrow Datasets and DuckDB ─────────────────────────────────────────────────
@@ -770,7 +774,7 @@ dt[, category := fcase(
 )]
 
 # fifelse: fast type-stable ifelse
-dt[, flag := fifelse(score > threshold, TRUE, FALSE)]
+dt[, verdict := fifelse(score > threshold, "pass", "fail")]
 dt
 
 

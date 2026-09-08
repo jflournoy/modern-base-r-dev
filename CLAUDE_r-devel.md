@@ -23,10 +23,11 @@ For full rationale, patterns, and examples, see [R-dev-guide.md](R-dev-guide.md)
 | `data.table` | All data manipulation |
 | `ggplot2` | All visualization |
 | `stringr` / `stringi` | String operations |
-| `arrow` | Feather + parquet I/O, lazy datasets |
+| `arrow` | Parquet I/O, lazy datasets |
 | `duckdb` | Out-of-core SQL queries |
 | `lubridate` | Heavy date/time work only |
-| `S7` | OOP in new packages |
+| `here` | Project-relative paths in scripts and tests |
+| `S7` | OOP in new packages — experimental, breaking changes possible |
 | `testthat` | Unit testing |
 | `targets` | Pipeline management |
 | `parallel` | Multicore parallelism (base R) |
@@ -56,6 +57,8 @@ Do not add fst. Justify any package not on this list before using it.
 - Test function contracts — inputs, outputs, error conditions — not implementation details
 - For data.table functions: test reference semantics explicitly (pass `copy(dt)` when needed)
 - Put tests in `tests/test-*.R`; run with `testthat::test_dir("tests/")`
+- Source the code under test with `here::here()`: `test_dir()` runs with the working
+  directory set to `tests/`, so a path relative to the project root does not resolve
 
 ---
 
@@ -65,16 +68,20 @@ Do not add fst. Justify any package not on this list before using it.
 - Keep `_targets.R` thin — one function call per `tar_target()`
 - Put all logic in functions in `R/`; test those functions with testthat
 - Track input files with `format = "file"` so targets detects changes on disk
+- Branching over a list needs `iteration = "list"` on both the list target and the
+  branched target; a downstream target receives every branch by naming the upstream
+  target, never via `tar_read()` inside a command
 
 ---
 
 ## Data I/O
 
-- Read CSV once with `fread()`, then write to feather (iterative work) or parquet (storage)
+- Read CSV once with `fread()`, then write parquet
 - Never re-read a CSV in an iterative workflow
-- Use `write_feather()` / `read_feather()` for working data
-- Use `write_parquet()` / `read_parquet()` for data that persists or gets shared
-- Wrap results in `as.data.table()` after reading from arrow/parquet
+- Use `write_parquet()` / `read_parquet()` for everything on disk — working, persistent, shared
+- Do not split working and stored data across two formats; the working file becomes the
+  shared one and the mismatch is silent
+- Wrap results in `as.data.table()` after reading from arrow
 
 ---
 

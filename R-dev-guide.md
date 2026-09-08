@@ -4,7 +4,7 @@
 The tidyverse trades dependencies and a proprietary dialect for ergonomics — a reasonable 
 trade for many workflows. This guide prefers base R and tools that earn their inclusion. 
 Each guideline contains a minimal reproducible example (MRE). As long as you have the package
-installed you should be able to run the MRE. Last updated: March 2026.*
+installed you should be able to run the MRE. Last updated: September 2026.*
 
 ---
 
@@ -18,14 +18,15 @@ pkgs <- c(
   "ggplot2",     # visualization
   "stringr",     # string operations (consistent API)
   "stringi",     # ICU-backed Unicode/locale string ops
-  "arrow",       # feather + parquet I/O, lazy datasets
+  "arrow",       # parquet I/O, lazy datasets
   "duckdb",      # in-process SQL, out-of-core analytics
   "profvis",     # profiling
   "bench",       # benchmarking
   "parallel",    # multicore parallelism (base R, ships with R)
   "lubridate",   # date/time (optional, for heavy date work)
-  "S7",          # modern OOP for new package development
-  "broom"        # tidy model output (used in lapply+rbindlist examples)
+  "S7",          # modern OOP — promising, still experimental (see OOP section)
+  "here",        # project-relative paths; tests need it (see Testing section)
+  "broom"        # tidy model output; used only in the examples, not a recommendation
 )
 
 install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
@@ -39,7 +40,7 @@ install.packages(pkgs[!pkgs %in% installed.packages()[, "Package"]])
 2. **Base R for everything else** — it's already there, it's fast, and it composes cleanly
 3. **ggplot2 for visualization** — it is genuinely excellent and stands alone
 4. **stringr/stringi for strings** — consistent API, backed by ICU; fine to depend on
-5. **feather for iteration, parquet for storage** — never re-read a CSV in an iterative workflow
+5. **Parquet for everything on disk** — never re-read a CSV in an iterative workflow
 6. **Intermediate variables, not chains** — name your transformations; pipes are for 2 steps max
 7. **Profile before optimizing** — use `profvis` and `bench` to find real bottlenecks
 8. **Functional, not fluent** — write functions, not sentences
@@ -125,10 +126,11 @@ data.table is a strong choice for data manipulation in R. It is:
 - Dependency-light
 - Expressive once you know the `[i, j, by]` grammar
 
-> **Version note**: All patterns in this guide require data.table ≥ 1.13.0 (July 2020),
+> **Version note**: This guide assumes R ≥ 4.1, which introduced the native pipe `|>`
+> and the lambda shorthand `\(x)`. Patterns here require data.table ≥ 1.13.0 (July 2020),
 > which introduced `fcase()` and `fifelse()`. `setindex()` and `patterns()` for `.SDcols`
-> have been available since v1.9.4–v1.9.6 (2014–2015). Current CRAN release: v1.18.x.
-> If you're on an older install, `update.packages()` before using this guide.
+> have been available since v1.9.4–v1.9.6 (2014–2015). Current CRAN release: v1.18.6.1
+> (August 2026). If you're on an older install, `update.packages()` before using this guide.
 
 ### Setup
 
@@ -198,14 +200,15 @@ dt[, c("a", "b") := .(x + y, y - z)]
 
 # Conditional assignment
 dt[group == "A", flag := TRUE]
-dt[, label := ifelse(score > 0.5, "high", "low")]
+dt[, label := fifelse(score > 0.5, "high", "low")]  # fifelse is type-stable
 
 # Delete a column
 dt[, new_col := NULL]
 
 # Apply a function to multiple columns by name
 cols <- c("x", "y", "z")
-dt[, (cols) := lapply(.SD, scale), .SDcols = cols]
+dt[, (cols) := lapply(.SD, function(x) as.numeric(scale(x))), .SDcols = cols]
+# as.numeric() drops the scaled:center / scaled:scale attributes scale() attaches
 dt
 ```
 
@@ -353,6 +356,9 @@ The ergonomics argument for tidyverse comes with a dependency cost and a dialect
 
 ### Functional Programming with Base R
 
+R ≥ 4.1 has a lambda shorthand: `\(x)` is exactly `function(x)`. The examples below spell
+out `function`; either form is fine for a one-liner.
+
 ```r
 dt_list <- list(
   A = data.frame(score = c(80, 90, 70)),
@@ -480,8 +486,8 @@ focused package — not the rest of tidyverse.
 
 ## ggplot2: It's Great, Use It
 
-ggplot2 is exquisite, and it composes with any tabular data source
-(data.table, base R data frames, matrices via `reshape2`/`melt`).
+ggplot2 is exquisite, and it composes with any tabular data source (data.table, base R
+data frames, or a matrix reshaped with data.table's `melt()`).
 
 ```r
 library(data.table)
@@ -570,6 +576,7 @@ ggplot(plot_dt, aes(x = cohort, y = pct_pass, ymin = ci_lo, ymax = ci_hi)) +
 library(data.table)
 
 compute_effect_size <- function(x, y, type = c("cohen_d", "glass_delta")) {
+  if (!is.numeric(x) || !is.numeric(y)) stop("`x` and `y` must be numeric")
   type      <- match.arg(type)
   pooled_sd <- sqrt(((length(x) - 1) * var(x) + (length(y) - 1) * var(y)) /
                     (length(x) + length(y) - 2))
@@ -663,8 +670,11 @@ rbindlist(lapply(groups, summarise_group, dt = dt))
 # ── idcol: track which item produced each row ──────────────────────────────
 
 fit_group <- function(group_dt) {
-  as.data.table(coef(lm(score ~ 1, data = group_dt)), keep.rownames = "term")
+  co <- coef(lm(score ~ 1, data = group_dt))
+  data.table(term = names(co), estimate = unname(co))
 }
+# Not as.data.table(co, keep.rownames = "term"): on a named vector that silently
+# yields columns V1 and V2, and the "term" name is ignored.
 dt_list <- split(dt, by = "group")
 rbindlist(lapply(dt_list, fit_group), idcol = "group")
 
@@ -761,14 +771,19 @@ result <- rbindlist(results)
 
 ### Modify In Place (data.table)
 
-Every `dplyr::mutate()` call returns a copy of the data frame. For large data,
-this adds up quickly. data.table's `:=` modifies in place — no copy.
+Adding a column does not copy a data frame: the unchanged columns are shared and only the
+new one is allocated. The copies come from assigning *into* an
+existing column. `df[i, "col"] <- v` duplicates the whole column before writing, and
+`tracemem()` will show it. data.table's `:=` writes into the existing column — no copy.
 
 ```r
-# This creates a new copy of dt every time (dplyr style)
-dt2 <- dplyr::mutate(dt, log_val = log(value))
+# Base R: a subassignment copies the whole column first
+df[df$value < 0, "value"] <- 0
 
-# This modifies in place — no copy
+# data.table: writes into the existing column in place
+dt[value < 0, value := 0]
+
+# Adding a column allocates only the new column, in either idiom
 dt[, log_val := log(value)]
 
 # Chain multiple in-place assignments
@@ -792,9 +807,9 @@ result <- dt[group == "A" & score > 0, .(n = .N)]
 # When you need a subset you'll reuse, copy deliberately
 group_a <- copy(dt[group == "A"])  # explicit, documented
 
-# Be careful with R's copy-on-modify for base R data frames
-# Every time you do df$new_col <- ..., R may copy the whole frame
-# setDT() + := avoids this
+# Base R copy-on-modify: df$new_col <- ... shares the existing columns, but
+# df[i, "col"] <- ... copies that whole column before writing
+# setDT() + := writes in place instead
 ```
 
 ### Column Types Matter
@@ -832,7 +847,7 @@ merged <- dt_b[dt_a]  # keyed join, much faster than merge() on large tables
 
 # Secondary indices (don't sort, but enable fast lookup)
 setindex(dt, group)
-dt[.("treatment"), on = "group"]  # on = is required; without it, falls back to full scan
+dt[.("treatment"), on = "group"]  # on = is required — without a key or on=, this errors
 ```
 
 ### Parallelism: Multicore vs Multiprocess
@@ -868,8 +883,10 @@ run_simulation <- function(sim_id) {
 # ── Multicore (fork): mclapply ─────────────────────────────────────────────
 # Use when: Unix/Mac, CPU-bound, workers share a large read-only object
 # WARNING: unstable inside RStudio/Positron on macOS — run from terminal if hangs occur
-sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores,
-                                  mc.set.seed = TRUE))
+# Reproducible because run_simulation() seeds itself from sim_id. mc.set.seed is TRUE by
+# default and does not get you this — it seeds children from time and PID. Seed inside the
+# worker, or set RNGkind("L'Ecuyer-CMRG") before set.seed().
+sim_results <- rbindlist(mclapply(seq_len(50), run_simulation, mc.cores = n_cores))
 sim_results
 
 # ── Multiprocess (socket): parLapply ──────────────────────────────────────
@@ -889,26 +906,23 @@ system.time(run_simulation(1))
 
 </details>
 
-### Binary Formats: Feather and Parquet
+### Binary Formats: Use Parquet
 
-Never re-read a CSV in an iterative workflow. After the first read, write to a binary
-format. Two formats cover all cases:
+Never re-read a CSV in an iterative workflow. After the first read, write parquet.
 
-**Feather** (Arrow IPC format) is the default for iterative analytical work — loading,
-exploring, reloading the same dataset across sessions. Read speed is comparable to or
-faster than fst, compression via LZ4 is fast and lossless, and the format is
-cross-language: the same file loads in Python (pandas, Polars), Julia, and DuckDB
-without any conversion. Use the `.arrow` extension (recommended); `.feather` also works
-for V2 files. Note: `write_feather()` and `write_ipc_file()` share the same parameters
-but are not strict aliases — `write_feather()` supports a `version` argument for legacy
-V1 files; `write_ipc_file()` is V2 only.
+Feather (Arrow IPC) is faster to read, and that is the only argument for it. Against it,
+the [Arrow project's own FAQ](https://arrow.apache.org/faq/) says the IPC format does not
+prioritize long-term storage, that parquet files are often much smaller, and that parquet
+may be the better choice even for short-term caching when disk or network is slow. And
+parquet is what everything else reads (DuckDB, Polars, Spark, BigQuery, pandas).
 
-**Parquet** is the format for anything that persists or gets shared. Best compression
-(4–5× smaller than feather on typical mixed-type data due to dictionary and run-length
-encoding before general compression), predicate pushdown and partition pruning for
-selective queries on large datasets, and the industry standard for data lakes, Spark,
-BigQuery, and DuckDB. The tradeoff is slower writes (typically 2–3× vs feather) — acceptable for
-data you write once and query many times.
+Splitting the job across two formats, one for working data and one for storage, has a
+failure mode of its own. A "working" file has a way of becoming the shared one, and the
+moment it does, the tier you chose months ago is a format mismatch nobody looks for. One
+format has no such seam.
+
+Feather keeps a narrow case: a short-lived handoff between two processes on the same
+machine, written and consumed inside one run, never persisted. Outside that, use parquet.
 
 ```r
 library(data.table)
@@ -922,23 +936,20 @@ dt_raw <- data.table(
   date    = seq.Date(as.Date("2022-01-01"), by = "day", length.out = 1000)
 )
 
-# ── Feather: fast reads, good for iterative work ──────────────────────────
-feather_path <- tempfile(fileext = ".arrow")
-write_feather(dt_raw, feather_path)
-dt <- as.data.table(read_feather(feather_path))
-
-# Column selection on read
-dt_sub <- as.data.table(read_feather(feather_path, col_select = c("id", "outcome")))
-
-# ── Parquet: best compression, good for storage and sharing ──────────────
+# ── Parquet: the default for anything on disk ─────────────────────────────
 parquet_path <- tempfile(fileext = ".parquet")
 write_parquet(dt_raw, parquet_path)
-dt2     <- as.data.table(read_parquet(parquet_path))
-dt2_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "group")))
+dt <- as.data.table(read_parquet(parquet_path))
+
+# Column selection on read — only the named columns leave the file
+dt_sub <- as.data.table(read_parquet(parquet_path, col_select = c("id", "outcome")))
+
+# Compression is per-file; zstd is a good default when size matters
+write_parquet(dt_raw, parquet_path, compression = "zstd")
 
 # ── Format reference ───────────────────────────────────────────────────────
-# feather:  fastest reads, cross-language, LZ4/ZSTD, good for iterative work
-# parquet:  best compression, predicate pushdown, industry standard for storage
+# parquet:  the default — compact, predicate pushdown, read by everything
+# feather:  short-lived same-machine handoff only, written and consumed in one run
 # RDS:      arbitrary R objects (models, lists) — not for data frames
 # CSV:      only for handoff to tools that can't read binary formats
 ```
@@ -949,14 +960,14 @@ For data that doesn't fit comfortably in memory, or large partitioned data on di
 where you only ever need a slice, Arrow datasets with DuckDB as the query engine
 are the right architecture.
 
-**Arrow `open_dataset()`** provides lazy evaluation over a directory of parquet or
-feather files. Filters, column selection, and group aggregations are pushed down to
+**Arrow `open_dataset()`** provides lazy evaluation over a directory of parquet
+files. Filters, column selection, and group aggregations are pushed down to
 the file layer — only the result enters R memory. Writing with `partitioning`
 creates a Hive-style directory structure (`year=2021/group=treatment/`) that Arrow
 exploits for partition pruning: `filter(year == 2021)` never touches files from other years.
 
-**DuckDB** is an in-process analytical database that queries parquet and feather
-files directly, with the Arrow zero-copy integration meaning no data moves between
+**DuckDB** is an in-process analytical database that queries parquet files
+directly, with the Arrow zero-copy integration meaning no data moves between
 R and DuckDB memory during queries. It also handles out-of-core sorting, joining,
 and windowing for data that exceeds RAM.
 
@@ -1042,15 +1053,6 @@ rm(small)
 gc()
 ```
 
-### A Note on fst
-
-fst was the correct choice for fast R-only binary I/O until around 2022. It is not
-a good choice for new projects today. The package has not had a CRAN release since
-February 2022, has 130+ open unanswered GitHub issues including known crash bugs,
-and is R-only with no cross-language support. Existing fst files remain readable
-and the format is stable — if you have a codebase using fst and migration isn't
-worth the cost, it's fine to leave it. For new work, use feather or parquet.
-
 ---
 
 ## Vectorization
@@ -1084,7 +1086,7 @@ dt[, category := fcase(
 )]
 
 # fifelse: fast type-stable ifelse
-dt[, flag := fifelse(score > threshold, TRUE, FALSE)]
+dt[, verdict := fifelse(score > threshold, "pass", "fail")]
 dt
 ```
 
@@ -1147,10 +1149,17 @@ p <- new("Participant",
 n_waves(p)
 ```
 
-### S7: Good Choice for New Packages
+### S7: Promising but Still Experimental
 
-S7 (available in the `S7` package) offers S4-like structure with S3-like simplicity.
-Worth it for new package development that needs validation and clear class hierarchies.
+S7 offers S4-like structure with S3-like simplicity, and it comes out of the R Consortium
+working group (R-Core, Bioconductor, and Posit are all represented) as a proposed successor
+to S3 and S4. That makes it the right thing to learn.
+
+It is not yet the safe default for a package you intend to keep. As of September 2026 S7
+is at version 0.2.2, is badged `lifecycle: experimental`, and its own README says the
+authors "reserve the right" to make breaking changes. Use it in a new package when you
+want what it offers and can absorb an API change. Reach for S3 when you want the class to
+still work untouched in three years.
 
 ```r
 library(S7)
@@ -1228,7 +1237,7 @@ bench::mark(
 # Fix: setkey() + keyed joins
 
 # Bottleneck: reading same large file multiple times
-# Fix: read once, write to feather (iterative) or parquet (storage); see Large Data section
+# Fix: read once, write parquet; see the Large Data section
 ```
 
 ---
@@ -1245,12 +1254,13 @@ Every dependency you add is a dependency your users carry. Be deliberate.
 # - ggplot2:    for visualization
 # - stringr:    clean string API, fine in isolation (backed by stringi)
 # - stringi:    ICU-backed Unicode/locale-aware string ops, heavy lifting
-# - arrow:      feather + parquet I/O, lazy datasets, zero-copy Arrow↔DuckDB
-# - duckdb:     in-process SQL, out-of-core analytics, queries parquet/feather
+# - arrow:      parquet I/O, lazy datasets, zero-copy Arrow↔DuckDB
+# - duckdb:     in-process SQL, out-of-core analytics, queries parquet directly
 # - Rcpp:       for C++ extensions
 # - Matrix:     for sparse matrices
 # - lme4/brms:  for modeling
 # - lubridate:  for heavy date work (isolated, focused)
+# - here:       project-root-relative paths, so tests find R/ from tests/
 
 # Not worth adding to avoid writing 3 lines of base R:
 # - dplyr   (use data.table)
@@ -1259,7 +1269,7 @@ Every dependency you add is a dependency your users carry. Be deliberate.
 # - forcats (use factor() / levels())
 # - readr   (use fread)
 # - tibble  (use data.table or data.frame)
-# - fst     (unmaintained since 2022 — use feather for new work)
+# - fst     (use parquet)
 # - tidyverse (meta-package — pulls in everything; prefer individual tools)
 ```
 
@@ -1316,11 +1326,13 @@ net for refactoring. Use it for any non-trivial function.
 ### Setup
 
 ```r
-install.packages("testthat")
+install.packages(c("testthat", "here"))
 ```
 
 For a standalone script workflow (no package), put tests in a `tests/` directory
-and run them with `testthat::test_dir("tests/")`. For package development,
+and run them with `testthat::test_dir("tests/")`. Source the code under test with
+`here::here()`, not a path relative to the project root: `test_dir()` and `test_file()`
+change the working directory to `tests/` while the tests run. For package development,
 `usethis::use_testthat()` wires everything up.
 
 ```
@@ -1339,7 +1351,10 @@ project/
 ```r
 # tests/test-analysis.R
 library(testthat)
-source("R/analysis.R")
+# test_dir() runs with the working directory set to tests/, so source("R/analysis.R")
+# does not resolve. here() finds the project root (a .git directory, an .Rproj file,
+# or an empty .here file) from any working directory.
+source(here::here("R", "analysis.R"))
 
 # ── RED: write these before the function exists ───────────────────────────
 
@@ -1353,7 +1368,7 @@ test_that("compute_effect_size returns correct Cohen's d", {
 })
 
 test_that("compute_effect_size errors on non-numeric input", {
-  expect_error(compute_effect_size("a", 1:5), class = "simpleError")
+  expect_error(compute_effect_size("a", 1:5), "must be numeric")
 })
 
 test_that("compute_effect_size handles equal vectors", {
@@ -1368,7 +1383,7 @@ test_that("compute_effect_size handles equal vectors", {
 
 ```r
 # Equality
-expect_equal(result, expected)           # numeric: uses tolerance (~1e-7)
+expect_equal(result, expected)           # numeric: tolerance sqrt(.Machine$double.eps), ~1.5e-8
 expect_identical(result, expected)       # exact: type + value + attributes
 
 # Type and structure
@@ -1435,8 +1450,9 @@ testthat::test_file("tests/test-analysis.R")
 # In a package
 devtools::test()
 
-# Run a specific test by name (grepl match on description)
-testthat::test_dir("tests/", filter = "effect_size")
+# Run a subset of files: filter is a regex on the file name with "test-" and ".R"
+# stripped — not on test descriptions. This runs tests/test-analysis.R only
+testthat::test_dir("tests/", filter = "analysis")
 ```
 
 ### What to Test
@@ -1609,28 +1625,41 @@ list(
 )
 
 # ── Dynamic branching: inputs determined at runtime ────────────────────────
+
+# One function per branch. It carries the group label in its output, because the
+# branch names targets generates are hashes, not labels.
+tidy_group <- function(dt) {
+  fit <- lm(outcome ~ score_z, data = dt)
+  out <- as.data.table(broom::tidy(fit))
+  out[, group := dt$group[1]]
+  out
+}
+
 list(
   tar_target(clean_data, clean(raw_data)),
 
-  # Split into a list of data.tables — one per group
+  # Split into a list of data.tables — one per group. iteration = "list" makes
+  # each branch below receive one element; with the default "vector" iteration
+  # a branch gets a length-one list instead, and lm() fails with "object not found"
   tar_target(
     group_data,
     split(clean_data, by = "group"),
-    pattern = NULL  # this target itself isn't branched
+    iteration = "list"
   ),
 
-  # Fit a model for each element — creates one sub-target per group
+  # One branch per group. iteration = "list" again, so the downstream target
+  # receives the branches as a plain list rbindlist() can stack; with the default,
+  # targets stacks them itself and rbindlist() refuses the result
   tar_target(
-    group_model,
-    fit_model(group_data),
-    pattern = map(group_data)   # branches over group_data
+    group_coefs,
+    tidy_group(group_data),
+    pattern   = map(group_data),
+    iteration = "list"
   ),
 
-  # Aggregate all branches back into one object
-  tar_target(
-    all_coefs,
-    rbindlist(lapply(tar_read(group_model), broom::tidy), idcol = "group")
-  )
+  # Aggregate: naming the upstream target gives a downstream target every branch.
+  # tar_read() is for interactive use — never call it inside a command
+  tar_target(all_coefs, rbindlist(group_coefs))
 )
 ```
 
@@ -1684,8 +1713,10 @@ library(crew)
 tar_option_set(controller = crew_controller_local(workers = 4))
 tar_make()
 
-# Store targets in a non-default location (useful for large outputs)
-tar_option_set(store = "cache/_targets")
+# Store targets in a non-default location (useful for large outputs).
+# store is a tar_config_set() setting; tar_option_set(store = ...) errors with
+# "unused argument"
+tar_config_set(store = "cache/_targets")
 ```
 
 ---
@@ -1738,7 +1769,7 @@ if (identical(x, "abc")) { ... } # not: if (x == "abc") for scalars
 | `case_when(...)` | `fcase(...)` (data.table) |
 | `if_else(...)` | `fifelse(...)` (data.table) |
 | `count(dt, g)` | `dt[, .N, by = g]` |
-| `distinct(dt, col)` | `unique(dt, by = "col")` |
+| `distinct(dt, col)` | `unique(dt[, .(col)])`; `unique(dt, by = "col")` keeps the other columns, like `.keep_all = TRUE` |
 | `pull(dt, col)` | `dt$col` or `dt[["col"]]` |
 | `map(x, f)` | `lapply(x, f)` |
 | `map_dbl(x, f)` | `vapply(x, f, numeric(1))` |
