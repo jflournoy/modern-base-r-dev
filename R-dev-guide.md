@@ -743,31 +743,10 @@ dt <- fread(cmd = "grep 'treatment' big.csv")
 dt <- fread(cmd = "awk -F, '$3 == \"A\"' big.csv")  # column filter
 ```
 
-<details>
-<summary>Chunked file reading</summary>
-
-```r
-# For very large files, read in chunks
-# WARNING: readLines-based chunking breaks on CSV fields that contain embedded newlines
-# (valid per RFC 4180). Safe only if you control the data and know it has none.
-# For untrusted or complex CSVs, prefer Arrow open_dataset() + collect() in batches.
-chunk_size <- 1e6
-con <- file("big.csv", "r")
-header <- readLines(con, n = 1)
-results <- list()
-i <- 1
-repeat {
-  chunk_lines <- readLines(con, n = chunk_size)
-  if (length(chunk_lines) == 0) break
-  chunk <- fread(paste(c(header, chunk_lines), collapse = "\n"))
-  results[[i]] <- process_chunk(chunk)
-  i <- i + 1
-}
-close(con)
-result <- rbindlist(results)
-```
-
-</details>
+Do not chunk a CSV with `readLines()`. A quoted field may contain a newline (RFC 4180
+allows it), and a line-based split cuts that record in two with no error. For a file that
+does not fit in memory, convert it to parquet once and query it lazily; see
+[Arrow Datasets and DuckDB](#large-data-arrow-datasets-and-duckdb) below.
 
 ### Modify In Place (data.table)
 
